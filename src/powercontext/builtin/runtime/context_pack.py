@@ -30,16 +30,21 @@ DEFAULT_CONTEXT_CHUNK_BYTES = 512
 CONTEXT_PACK_RUNTIME_CHUNK_BYTES = 128
 
 
-class ContextPackError(Exception):
+class ContextPackError(ValueError):
     """Raised when a Context Pack or delta violates the wire contract."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ContextPack:
     """One complete context payload split into deterministic chunks."""
 
     items: tuple[bytes, ...]
     digest: str
+    byte_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.byte_count:
+            object.__setattr__(self, "byte_count", len(self.to_bytes()))
 
     @classmethod
     def build(cls, items: tuple[bytes, ...]) -> ContextPack:
@@ -75,7 +80,7 @@ class ContextPack:
         return cls.build(tuple(chunks))
 
     @property
-    def byte_count(self) -> int:
+    def wire_size(self) -> int:
         """Exact serialized size of this pack, including the byte_count field."""
 
         return len(self.to_bytes())
@@ -113,8 +118,8 @@ class ContextPack:
         byte_count = payload["byte_count"]
         if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0:
             raise ContextPackError("pack byte_count must be a non-negative integer")
-        pack = cls(items=items, digest=digest)
-        if pack.byte_count != byte_count:
+        pack = cls(items=items, digest=digest, byte_count=byte_count)
+        if len(pack.to_bytes()) != byte_count:
             raise ContextPackError("pack byte_count does not match its serialized size")
         return pack
 

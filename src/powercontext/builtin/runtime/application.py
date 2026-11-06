@@ -855,8 +855,6 @@ class ScopedContextApplication:
     async def prepare_incremental(
         self,
         request: PrepareContextRequest,
-        /,
-        *,
         base_pack: ContextPack | None = None,
     ) -> ContextPack | ContextPackDelta:
         """Prepare context and express it as a full pack or one delta over ``base_pack``.
