@@ -30,6 +30,7 @@ from powercontext.sources.models import Source, SourceMaterialization
 
 if TYPE_CHECKING:
     from powercontext.artifacts import MemoryCitation
+    from powercontext.builtin.artifacts.memory.models import MemoryHit
 
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 PDF_PAGE_SOURCE_PREFIX = "pdf"
@@ -158,7 +159,9 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
 
     The scoped Memory already holds one entry per page, so the exact citations follow
     the coarse lexical ranking: hits arrive best-first and distinct entries correspond
-    to distinct physical pages.
+    to distinct physical pages. One expanded query adds morphological neighbours of the
+    question terms — financial reports inflect words differently than questions do —
+    and both rankings are fused so either spelling of an answer page can surface.
     """
 
     from powercontext.artifacts import MemoryCitation
@@ -169,21 +172,26 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be a positive integer")  # noqa: TRY003
 
-    page = await memory.search(
-        SearchMemoryRequest(query=question, mode="fts", limit=max(limit * 3, limit))
-    )
+    pool = max(limit * 3, limit)
+    primary = await memory.search(SearchMemoryRequest(query=question, mode="fts", limit=pool))
+    rankings = [primary.hits]
+    expanded = _expanded_query(question)
+    if expanded is not None:
+        secondary = await memory.search(SearchMemoryRequest(query=expanded, mode="fts", limit=pool))
+        rankings.append(secondary.hits)
+
+    scores: dict[tuple[str, str], float] = {}
+    hits_by_key: dict[tuple[str, str], MemoryHit] = {}
+    for weight, ranking in zip((1.0, 0.5), rankings, strict=False):
+        for rank, hit in enumerate(ranking, start=1):
+            key = (hit.entry_id, hit.entry_version_id)
+            scores[key] = scores.get(key, 0.0) + weight / (_FUSION_CONSTANT + rank)
+            hits_by_key.setdefault(key, hit)
+    ranked_keys = sorted(scores, key=lambda key: (-scores[key], key))
+
     citations: list[MemoryCitation] = []
-    seen: set[tuple[str, str, int, str]] = set()
-    for hit in page.hits:
-        key = (
-            hit.memory_ref.family,
-            hit.memory_ref.artifact_id,
-            hit.memory_ref.revision,
-            hit.entry_id,
-        )
-        if key in seen:
-            continue
-        seen.add(key)
+    for key in ranked_keys[:limit]:
+        hit = hits_by_key[key]
         citations.append(
             MemoryCitation(
                 memory_ref=hit.memory_ref,
@@ -191,9 +199,47 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
                 entry_version_id=hit.entry_version_id,
             )
         )
-        if len(citations) == limit:
-            break
     return tuple(citations)
+
+
+_FUSION_CONSTANT = 60
+
+
+def _expanded_query(question: str) -> str | None:
+    """One extra query whose terms add morphological neighbours of the question terms."""
+
+    from powercontext.builtin.artifacts.search import analyze_fts_query
+
+    base_terms = analyze_fts_query(question).split()
+    expanded: list[str] = []
+    seen = set(base_terms)
+    for term in base_terms:
+        for neighbour in _morphological_neighbours(term):
+            if neighbour not in seen:
+                seen.add(neighbour)
+                expanded.append(neighbour)
+    if not expanded:
+        return None
+    return " ".join([*base_terms, *expanded])
+
+
+def _morphological_neighbours(term: str) -> tuple[str, ...]:
+    """Spelling variants a report may use where the question uses one form."""
+
+    if len(term) < 4 or term.isdigit():
+        return ()
+    neighbours: list[str] = []
+    if term.endswith("ies") and len(term) > 4:
+        neighbours.append(f"{term[:-3]}y")
+    if term.endswith("es") and len(term) > 4:
+        neighbours.append(term[:-2])
+    if term.endswith("s") and not term.endswith("ss"):
+        neighbours.append(term[:-1])
+    if term.endswith("ing") and len(term) > 5:
+        neighbours.append(term[:-3])
+    if term.endswith("ed") and len(term) > 4:
+        neighbours.append(term[:-2])
+    return tuple(dict.fromkeys(neighbours))
 
 
 def _validate_document_id(document_id: str) -> None:
