@@ -502,7 +502,7 @@ SELECT
     m.entry_id,
     m.entry_version_id,
     v.text,
-    MATCH(m.searchable_text) AGAINST (:analyzed_query) AS fts_score,
+    NULL AS fts_score,
     NULL AS distance,
     'fts' AS channel
 FROM pc_memory_entry_heads AS m
@@ -543,7 +543,8 @@ def _hybrid_statement(tagged: bool) -> str:
         "SELECT * FROM ("
         + _OCEANBASE_HYBRID_FTS_CHANNEL_SQL
         + fts_predicate
-        + " ORDER BY fts_score DESC, m.memory_artifact_id, m.entry_id, m.entry_version_id"
+        + " ORDER BY MATCH(m.searchable_text) AGAINST (:analyzed_query) DESC,"
+        + " m.memory_artifact_id, m.entry_id, m.entry_version_id"
         + " LIMIT :candidate_limit) AS fts_channel"
     )
     vector_body = _OCEANBASE_HYBRID_VECTOR_CHANNEL_SQL + (memory_tag_sql("m") if tagged else "")
