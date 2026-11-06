@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import math
+import re
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from itertools import chain
 from typing import TypeVar
@@ -43,6 +45,9 @@ from powercontext.builtin.runtime.prepared_text import (
 from powercontext.builtin.runtime.recall_sufficiency import RecallBudgetView
 
 _MIN_TRUNCATED_CONTENT_BYTES = 64
+_MIN_FRAGMENT_CHARS = 32
+_SEGMENT_PATTERN = re.compile(r"[^.!?]*[.!?]+|[^.!?]+")
+_TOKEN_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]")
 _ELLIPSIS = "…"
 _BEGIN_MARKER = "BEGIN_POWERCONTEXT_PREPARED_CONTEXT_V1"
 _END_MARKER = "END_POWERCONTEXT_PREPARED_CONTEXT_V1"
@@ -106,6 +111,31 @@ class PreparedContextBuild:
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple[PreparedContextFragment, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedContextFragment:
+    """One literal slice of a Memory entry, addressable back to its origin.
+
+    ``text`` is exactly ``entry.text[start:end]`` of the entry version named by ``address``,
+    so a caller can re-read the same evidence through a real Memory citation.
+    """
+
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True)
+class _FragmentDocument:
+    """One recalled Memory entry together with the segments its text is split into."""
+
+    group_index: int
+    address: MemoryEntryAddress
+    text: str
+    segments: tuple[tuple[int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -234,6 +264,13 @@ class PreparedContextBuilder:
             raise PreparedContextInvariantError("topic-memory-candidate-limit")
         if sum(len(candidates.hits) for candidates in experience_candidates) > self.experience_candidate_limit:
             raise PreparedContextInvariantError("experience-candidate-limit")
+
+        if request.evidence_selection and request.assembly is None:
+            return self._select_fragments(
+                request=request,
+                current_scope_id=current_scope_id,
+                memory_candidates=memory_candidates,
+            )
 
         content, origins, omissions = self._select_entries(
             request=request,
@@ -432,6 +469,98 @@ class PreparedContextBuilder:
             return None, (), omissions
         content = render_context_text(included, assembly)
         return content, tuple(origins), omissions
+
+    def _select_fragments(
+        self,
+        *,
+        request: PrepareContextRequest,
+        current_scope_id: str | None,
+        memory_candidates: Sequence[PreparedMemoryCandidates],
+    ) -> PreparedContextBuild:
+        """Select literal Memory fragments for this query and render them within the budget.
+
+        Only Memory candidates take part: the fragment path answers one question — which
+        exact span of the recalled text answers the query — and every other family would
+        need a different addressing contract.
+
+        Ranking uses query terms weighted by how rare they are inside the candidate pool, so
+        a term that every document repeats cannot outrank the one that identifies the
+        evidence. Selection then walks the documents round by round, which keeps the budget
+        from collapsing onto a single document when several were recalled.
+        """
+
+        query_tokens = _query_tokens(request.query)
+        documents: list[_FragmentDocument] = []
+        for group_index, group in enumerate(memory_candidates):
+            scope_id = group.scope_id or current_scope_id or ""
+            for hit in group.hits:
+                if group.memory_ref is not None and hit.memory_ref != group.memory_ref:
+                    raise PreparedContextInvariantError("memory-ref-mismatch")
+                if not hit.entry_id.strip() or not hit.entry_version_id.strip() or not hit.text.strip():
+                    continue
+                address = MemoryEntryAddress(
+                    memory=ArtifactAddress(scope_id=scope_id, artifact=hit.memory_ref),
+                    entry_id=hit.entry_id,
+                    entry_version_id=hit.entry_version_id,
+                )
+                documents.append(
+                    _FragmentDocument(
+                        group_index=group_index,
+                        address=address,
+                        text=hit.text,
+                        segments=tuple(_iter_segments(hit.text)),
+                    )
+                )
+        if not documents:
+            return PreparedContextBuild(context=self.empty(), origins=(), fragments=())
+
+        weights = _term_weights(documents, query_tokens)
+        ranked_documents: list[list[tuple[float, PreparedContextFragment]]] = []
+        for document in documents:
+            scored: list[tuple[float, int, PreparedContextFragment]] = []
+            for index, (start, end) in enumerate(document.segments):
+                text = document.text[start:end]
+                if not text.strip():
+                    continue
+                score = _segment_score(query_tokens, weights, text)
+                scored.append(
+                    (
+                        score,
+                        index,
+                        PreparedContextFragment(address=document.address, start=start, end=end, text=text),
+                    )
+                )
+            scored.sort(key=lambda row: (-row[0], row[1]))
+            ranked_documents.append([(score, fragment) for score, _, fragment in scored])
+
+        selected: list[PreparedContextFragment] = []
+        seen: set[tuple[str, str, str]] = set()
+        for rank in range(max((len(items) for items in ranked_documents), default=0)):
+            for items in ranked_documents:
+                if rank >= len(items):
+                    continue
+                _, fragment = items[rank]
+                key = (fragment.address.memory.scope_id, fragment.address.entry_id, fragment.text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if len(_render_fragments((*selected, fragment)).encode("utf-8")) <= request.max_bytes:
+                    selected.append(fragment)
+                    continue
+                shortened = _fit_fragment(selected, fragment, request.max_bytes)
+                if shortened is not None:
+                    selected.append(shortened)
+        if not selected:
+            return PreparedContextBuild(context=self.empty(), origins=(), fragments=())
+        content = _render_fragments(selected)
+        content_bytes = len(content.encode("utf-8"))
+        if content_bytes > request.max_bytes:
+            raise PreparedContextInvariantError("output-budget")
+        return PreparedContextBuild(
+            context=PreparedContext(status="ready", content=content, content_bytes=content_bytes),
+            origins=tuple(fragment.address for fragment in selected),
+            fragments=tuple(selected),
+        )
 
     def _profile_entries(self, candidates: Sequence[PreparedProfileCandidate]) -> tuple[_PreparedContextEntry, ...]:
         entries = []
@@ -692,6 +821,121 @@ def _render(entries: Sequence[_PreparedContextEntry]) -> str:
     }
     encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
     return "\n\n".join((TRUST_POLICY, f"{_BEGIN_MARKER}\n{encoded}\n{_END_MARKER}"))
+
+
+def _render_fragments(fragments: Sequence[PreparedContextFragment]) -> str:
+    """Render literal fragments with their scope-qualified citation and character range."""
+
+    envelope = {
+        "trust": "untrusted_history",
+        "items": [
+            {
+                "citation": {
+                    "scope_id": fragment.address.memory.scope_id,
+                    "memory_ref": fragment.address.memory.artifact.model_dump(mode="json"),
+                    "entry_id": fragment.address.entry_id,
+                    "entry_version_id": fragment.address.entry_version_id,
+                },
+                "content": fragment.text,
+                "start": fragment.start,
+                "end": fragment.end,
+            }
+            for fragment in fragments
+        ],
+    }
+    encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    return "\n\n".join((TRUST_POLICY, f"{_BEGIN_MARKER}\n{encoded}\n{_END_MARKER}"))
+
+
+def _fit_fragment(
+    selected: Sequence[PreparedContextFragment],
+    fragment: PreparedContextFragment,
+    max_bytes: int,
+) -> PreparedContextFragment | None:
+    """Shorten one fragment to the longest literal prefix that still fits the budget."""
+
+    lower = _MIN_FRAGMENT_CHARS
+    upper = len(fragment.text)
+    best: PreparedContextFragment | None = None
+    while lower <= upper:
+        size = (lower + upper) // 2
+        candidate = PreparedContextFragment(
+            address=fragment.address,
+            start=fragment.start,
+            end=fragment.start + size,
+            text=fragment.text[:size],
+        )
+        if len(_render_fragments((*selected, candidate)).encode("utf-8")) <= max_bytes:
+            best = candidate
+            lower = size + 1
+        else:
+            upper = size - 1
+    return best
+
+
+def _iter_segments(text: str) -> Iterator[tuple[int, int]]:
+    """Yield the character ranges of the sentence-like segments of one text."""
+
+    for match in _SEGMENT_PATTERN.finditer(text):
+        raw = match.group(0)
+        stripped = raw.rstrip()
+        if not stripped:
+            continue
+        yield match.start(), match.start() + len(stripped)
+
+
+def _query_tokens(query: str) -> frozenset[str]:
+    """Tokenize a query into the lowercase words and numbers it asks about."""
+
+    return frozenset(_TOKEN_PATTERN.findall(query.lower()))
+
+
+def _term_weights(
+    documents: Sequence[_FragmentDocument],
+    query_tokens: frozenset[str],
+) -> dict[str, float]:
+    """Weight every query term by how rare it is inside the recalled documents."""
+
+    if not query_tokens:
+        return {}
+    frequencies: dict[str, int] = {}
+    total = 0
+    for document in documents:
+        for start, end in document.segments:
+            tokens = frozenset(_TOKEN_PATTERN.findall(document.text[start:end].lower()))
+            if not tokens:
+                continue
+            total += 1
+            for token in tokens & query_tokens:
+                frequencies[token] = frequencies.get(token, 0) + 1
+    if total == 0:
+        return {token: 1.0 for token in query_tokens}
+    return {
+        token: math.log(1.0 + total / (1.0 + frequencies.get(token, 0)))
+        for token in query_tokens
+    }
+
+
+def _segment_score(
+    query_tokens: frozenset[str],
+    weights: dict[str, float],
+    text: str,
+) -> float:
+    """Score how well a segment answers the query, rewarding rare and adjacent terms."""
+
+    if not query_tokens:
+        return 0.0
+    lowered = text.lower()
+    tokens = frozenset(_TOKEN_PATTERN.findall(lowered))
+    matched = tokens & query_tokens
+    score = sum(weights.get(token, 1.0) for token in matched)
+    query_order = [token for token in _TOKEN_PATTERN.findall(lowered)]
+    positions = {token: index for index, token in enumerate(query_order)}
+    adjacent = 0
+    for first, second in zip(sorted(query_tokens), sorted(query_tokens)[1:], strict=False):
+        if first in positions and second in positions and abs(positions[first] - positions[second]) == 1:
+            adjacent += 1
+    return score + 2.0 * adjacent
 
 
 def _text_item(entry: _PreparedContextEntry) -> ContextTextItem:
