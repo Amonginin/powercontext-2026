@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import re
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -178,19 +179,66 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     pool = min(max(limit * 5, limit), _MAX_CANDIDATE_POOL)
     literal = analyze_fts_query(question) or question
     primary = await memory.search(SearchMemoryRequest(query=literal, mode="fts", limit=pool))
-    rankings = [primary.hits]
+    rankings: list[tuple[float, tuple[MemoryHit, ...]]] = [(1.0, primary.hits)]
     expanded = _expanded_query(question)
     if expanded is not None:
         secondary = await memory.search(SearchMemoryRequest(query=expanded, mode="fts", limit=pool))
-        rankings.append(secondary.hits)
+        rankings.append((0.5, secondary.hits))
 
     scores: dict[tuple[str, str], float] = {}
     hits_by_key: dict[tuple[str, str], MemoryHit] = {}
-    for weight, ranking in zip((1.0, 0.5), rankings, strict=False):
+    for weight, ranking in rankings:
         for rank, hit in enumerate(ranking, start=1):
             key = (hit.entry_id, hit.entry_version_id)
             scores[key] = scores.get(key, 0.0) + weight / (_FUSION_CONSTANT + rank)
             hits_by_key.setdefault(key, hit)
+
+    # A report page that answers a question usually carries several of the asked
+    # terms and the figures they describe. Reward that shape on top of the coarse
+    # ranking so a dense statement page can outrank a short page that merely
+    # repeats one word. Terms that appear on nearly every page — a running header,
+    # the company name — carry almost no weight in that reward.
+    from powercontext.builtin.artifacts.search import analyze_fts_query, analyze_text
+
+    literal_terms = (analyze_fts_query(question) or "").split()
+    scoring_terms = _expanded_query(question) or " ".join(literal_terms)
+    terms = {term for term in scoring_terms.split()}
+    literal_set = set(literal_terms)
+    page_words: dict[tuple[str, str], list[str]] = {}
+    if terms:
+        for key, hit in hits_by_key.items():
+            page_words[key] = analyze_text(hit.text).split()
+        document_frequency = {term: 0 for term in terms}
+        for words in page_words.values():
+            present = terms & set(words)
+            for term in present:
+                document_frequency[term] += 1
+        total = len(page_words)
+        # An expansion term is evidence only when the literal terms already agree:
+        # otherwise a rare synonym could outrank the words the question used.
+        weights = {
+            term: (
+                math.log((total + 1) / (document_frequency[term] + 1)) + 1.0
+                if term in literal_set
+                else (math.log((total + 1) / (document_frequency[term] + 1)) + 1.0) * _EXPANSION_WEIGHT
+            )
+            for term in terms
+        }
+        weight_total = sum(weights.values())
+        pairs = set(zip(literal_terms, literal_terms[1:], strict=False))
+        for key, hit in hits_by_key.items():
+            # Score the best passage rather than the whole page: a running header
+            # or a table of contents repeats on every page and would otherwise
+            # dominate a page-level match.
+            words = page_words[key]
+            coverage = _best_window_coverage(words, terms, weights, weight_total)
+            scores[key] += coverage * _COVERAGE_WEIGHT
+            if pairs:
+                phrase_hits = len(_window_bigrams(words, terms) & pairs)
+                if phrase_hits:
+                    scores[key] += _PHRASE_BONUS * phrase_hits
+            if _FIGURE_PATTERN.search(hit.text):
+                scores[key] += _FIGURE_BONUS
     ranked_keys = sorted(scores, key=lambda key: (-scores[key], key))
 
     citations: list[MemoryCitation] = []
@@ -208,10 +256,81 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
 
 _FUSION_CONSTANT = 60
 _MAX_CANDIDATE_POOL = 200
+_COVERAGE_WEIGHT = 0.05
+_FIGURE_BONUS = 0.01
+_PHRASE_BONUS = 0.015
+_EXPANSION_WEIGHT = 0.4
+_FIGURE_PATTERN = re.compile(r"\d")
+_WINDOW_WORDS = 90
+_WINDOW_STRIDE = 45
+
+# How a question names a thing versus how a filing labels it. These are generic
+# reporting terms, not answers: they only widen the lexical evidence terms so a
+# page headed "Our Divisions" can answer a question about geographies.
+_REPORTING_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "geograph": ("geographic", "geography", "regions", "divisions", "segment", "countries"),
+    "region": ("geographic", "division", "segment", "countries", "markets"),
+    "legal": ("litigation", "proceedings", "lawsuit", "claims", "contingencies", "matters"),
+    "battle": ("litigation", "proceedings", "lawsuit", "claims", "disputes"),
+    "lawsuit": ("litigation", "proceedings", "claims", "contingencies"),
+    "ebitda": ("operating", "income", "depreciation", "amortization", "cash", "flow"),
+    "capex": ("capital", "expenditure", "purchases", "property", "plant", "equipment"),
+    "restructuring": ("severance", "charges", "productivity", "cost"),
+    "employee": ("employees", "workforce", "personnel", "headcount"),
+    "shareholder": ("stockholders", "shares", "dividends", "equity"),
+    "debt": ("borrowings", "notes", "long-term", "interest", "obligations"),
+    "tax": ("income", "taxes", "effective", "rate", "provision"),
+    "revenue": ("net", "sales", "growth"),
+    "profit": ("operating", "income", "margin", "earnings"),
+    "margin": ("operating", "gross", "percent"),
+    "cash": ("flow", "operating", "activities", "equivalents"),
+    "dividend": ("dividends", "per", "share", "payments"),
+    "acquisition": ("acquisitions", "divestitures", "business", "purchase"),
+    "risk": ("risks", "factors", "market", "exposure"),
+    "competition": ("competitors", "competitive", "market"),
+    "regulation": ("regulatory", "laws", "compliance", "government"),
+    "supply": ("chain", "suppliers", "ingredients", "materials"),
+    "brand": ("brands", "trademarks", "portfolio"),
+    "pension": ("retirement", "benefits", "plans", "obligations"),
+    "lease": ("leases", "rent", "obligations", "operating"),
+    "goodwill": ("impairment", "intangible", "reporting", "unit"),
+}
+
+
+def _window_bigrams(words: list[str], terms: set[str]) -> set[tuple[str, str]]:
+    """Adjacent evidence-term pairs that appear next to each other on the page."""
+
+    return {
+        (first, second)
+        for first, second in zip(words, words[1:])
+        if first in terms and second in terms
+    }
+
+
+def _best_window_coverage(
+    words: list[str],
+    terms: set[str],
+    weights: dict[str, float],
+    weight_total: float,
+) -> float:
+    """The strongest IDF-weighted term coverage of any bounded passage on the page."""
+
+    if not words or weight_total <= 0:
+        return 0.0
+    window = _WINDOW_WORDS if len(words) > _WINDOW_WORDS else len(words)
+    stride = max(_WINDOW_STRIDE, 1)
+    best = 0.0
+    for start in range(0, len(words) - window + 1, stride):
+        present = terms & set(words[start : start + window])
+        if present:
+            score = sum(weights[term] for term in present) / weight_total
+            if score > best:
+                best = score
+    return best
 
 
 def _expanded_query(question: str) -> str | None:
-    """One extra query whose terms add morphological neighbours of the question terms."""
+    """One extra query that adds spelling and reporting-term neighbours."""
 
     from powercontext.builtin.artifacts.search import analyze_fts_query
 
@@ -223,9 +342,25 @@ def _expanded_query(question: str) -> str | None:
             if neighbour not in seen:
                 seen.add(neighbour)
                 expanded.append(neighbour)
+        for synonym in _reporting_synonyms(term):
+            if synonym not in seen:
+                seen.add(synonym)
+                expanded.append(synonym)
     if not expanded:
         return None
     return " ".join([*base_terms, *expanded])
+
+
+def _reporting_synonyms(term: str) -> tuple[str, ...]:
+    """Reporting terms a filing uses for the concept the question names."""
+
+    direct = _REPORTING_SYNONYMS.get(term)
+    if direct is not None:
+        return direct
+    for stem, synonyms in _REPORTING_SYNONYMS.items():
+        if len(term) >= len(stem) and term.startswith(stem):
+            return synonyms
+    return ()
 
 
 def _morphological_neighbours(term: str) -> tuple[str, ...]:
