@@ -253,6 +253,7 @@ from powercontext.builtin.runtime.recall_sufficiency import (
     build_recall_candidates,
     recall_effort,
 )
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleService
 from powercontext.builtin.runtime.statistics import RelationalScopedStatistics, overview_selection
 from powercontext.builtin.scope import ScopeApplication, ScopeDescriptor, ScopeSelection
 from powercontext.builtin.scope.subject_sources import SubjectSourceService
@@ -2631,6 +2632,16 @@ class ScopedMemoryApplication:
             return await context.triggers.cursor()
 
 
+class LifecycleApplication:
+    """Select the scoped Source lifecycle service."""
+
+    def __init__(self, runtime: BuiltinRuntime) -> None:
+        self._runtime = runtime
+
+    def for_scope(self, scope_id: str, /) -> SourceLifecycleService:
+        return SourceLifecycleService(self._runtime, scope_id)
+
+
 class MemoryApplication:
     """Select the application service for one Memory family scope."""
 
@@ -2712,7 +2723,20 @@ class ScopedTopicMemoryApplication:
                         "unit": "topic-memory",
                     },
                 )
-        return result
+        return await self._without_withdrawn_topics(result)
+
+    async def _without_withdrawn_topics(self, result: TopicMemorySearchResult) -> TopicMemorySearchResult:
+        """Drop topics whose evidence is currently withdrawn by the lifecycle graph."""
+
+        if not result.hits:
+            return result
+        withdrawn = await self._runtime.lifecycle.for_scope(self.scope_id).withdrawn_topics()
+        if not withdrawn:
+            return result
+        hits = tuple(hit for hit in result.hits if hit.artifact_ref.artifact_id not in withdrawn)
+        if len(hits) == len(result.hits):
+            return result
+        return result.model_copy(update={"hits": hits})
 
     async def _search_with_embedding(
         self,
@@ -3035,6 +3059,7 @@ class BuiltinRuntime:
         topic_memory_flush: TopicMemoryFlush | None = None,
         topic_memory_embedding_model: EmbeddingModel | None = None,
         topic_memory_processing_available: bool = False,
+        lifecycle_database: Any | None = None,
         topic_memory_search_observer: TopicMemorySearchObserver | None = None,
         external_skill_registry: ExternalSkillRegistryFactory | None = None,
         external_skill_importer: ExternalSkillImporter | None = None,
@@ -3064,6 +3089,7 @@ class BuiltinRuntime:
         if scope_cache_size < 1:
             raise _RuntimeConfigurationError("scope_cache_size")
         self._provider = provider
+        self._lifecycle_database = lifecycle_database
         self._capabilities = capabilities
         self._review_service = review_service
         self.profiles = profiles
@@ -3140,6 +3166,7 @@ class BuiltinRuntime:
         self.memory = MemoryApplication(self)
         self.topic_memory = TopicMemoryApplication(self)
         self.records = RecordApplication(self)
+        self.lifecycle = LifecycleApplication(self)
         self.prompts = PromptApplication(self)
         self.review = ReviewApplication(self)
         self.skill = SkillApplication(self)
