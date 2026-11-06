@@ -653,6 +653,10 @@ class OceanBaseMemoryHybridIndex:
                 },
             )
         ).mappings()
+        # Materialize before splitting: the mapping result is a single-pass
+        # iterator, so the second comprehension would otherwise see nothing and
+        # every hybrid hit would report only the FTS channel.
+        rows = rows.all()
         fts_rows = [row for row in rows if row["channel"] == "fts"]
         vector_rows = [row for row in rows if row["channel"] == "vector"]
         return MemorySearchChannels(
