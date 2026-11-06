@@ -256,6 +256,23 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
                     scores[key] += _PHRASE_BONUS * phrase_hits
             if _FIGURE_PATTERN.search(hit.text):
                 scores[key] += _FIGURE_BONUS
+    if len(hits_by_key) < limit:
+        # The admission floor can leave fewer than `limit` pages, and every page
+        # the caller never sees is a chance lost to reach an answer. Recall the
+        # literal terms on their own and append whatever is still missing; these
+        # tail candidates carry no ranking weight, they only fill the response.
+        for term in literal.split()[:_FILL_TERMS]:
+            if len(hits_by_key) >= limit:
+                break
+            if len(term) < 4:
+                continue
+            extra = await memory.search(SearchMemoryRequest(query=term, mode="fts", limit=limit))
+            for hit in extra.hits:
+                key = (hit.entry_id, hit.entry_version_id)
+                if key not in hits_by_key:
+                    hits_by_key[key] = hit
+                    scores[key] = 0.0
+
     ranked_keys = sorted(scores, key=lambda key: (-scores[key], key))
 
     citations: list[MemoryCitation] = []
@@ -284,6 +301,7 @@ _HEADING_WORDS = 32
 _HEADING_BONUS = 0.02
 _SHARP_TERM_COUNT = 2
 _FOCUSED_HEAD = 5
+_FILL_TERMS = 4
 
 # How a question names a thing versus how a filing labels it. These are generic
 # reporting terms, not answers: they only widen the lexical evidence terms so a
