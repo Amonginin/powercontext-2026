@@ -159,12 +159,15 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
 
     The scoped Memory already holds one entry per page, so the exact citations follow
     the coarse lexical ranking: hits arrive best-first and distinct entries correspond
-    to distinct physical pages. One expanded query adds morphological neighbours of the
-    question terms — financial reports inflect words differently than questions do —
-    and both rankings are fused so either spelling of an answer page can surface.
+    to distinct physical pages. The literal query is reduced to its evidence terms first,
+    because question function words would otherwise dilute the ranking of every page.
+    One expanded query adds morphological neighbours of those terms — reports inflect
+    words differently than questions do — and both rankings are fused so either spelling
+    of an answer page can surface.
     """
 
     from powercontext.artifacts import MemoryCitation
+    from powercontext.builtin.artifacts.search import analyze_fts_query
     from powercontext.builtin.runtime import SearchMemoryRequest
 
     if not isinstance(question, str) or not question.strip():
@@ -172,8 +175,9 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be a positive integer")  # noqa: TRY003
 
-    pool = max(limit * 3, limit)
-    primary = await memory.search(SearchMemoryRequest(query=question, mode="fts", limit=pool))
+    pool = min(max(limit * 5, limit), _MAX_CANDIDATE_POOL)
+    literal = analyze_fts_query(question) or question
+    primary = await memory.search(SearchMemoryRequest(query=literal, mode="fts", limit=pool))
     rankings = [primary.hits]
     expanded = _expanded_query(question)
     if expanded is not None:
@@ -203,6 +207,7 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
 
 
 _FUSION_CONSTANT = 60
+_MAX_CANDIDATE_POOL = 200
 
 
 def _expanded_query(question: str) -> str | None:
