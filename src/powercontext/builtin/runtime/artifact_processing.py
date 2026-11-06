@@ -47,6 +47,7 @@ else:
     from multiprocessing.popen_spawn_posix import Popen as SpawnPopen
 
 from powercontext._logging import log_safely
+from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.errors import ArtifactProcessingLeadershipLostError
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
@@ -57,7 +58,11 @@ from powercontext.builtin.persistence.supervision import (
     ArtifactProcessingLeaseRepository,
     database_utc_now,
 )
-from powercontext.builtin.persistence.tables import ARTIFACT_PROCESSING_INTENTS_TABLE, ARTIFACT_PROCESSING_LEASES_TABLE
+from powercontext.builtin.persistence.tables import (
+    ARTIFACT_PROCESSING_INTENTS_TABLE,
+    ARTIFACT_PROCESSING_LEASES_TABLE,
+    SOURCE_JOURNAL_HEADS_TABLE,
+)
 from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkAssignment,
     ArtifactProcessingWorkerCompletion,
@@ -111,6 +116,7 @@ class ArtifactProcessingBinding:
     worker_timeout_seconds: float = 600.0
     automatic_processing_interval: timedelta | None = None
     cron: str | None = None
+    source_count_threshold: int | None = None
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
     pending_provider: ArtifactProcessingPendingProvider | None = None
@@ -138,6 +144,10 @@ class ArtifactProcessingBinding:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
+        if self.source_count_threshold is not None and (
+            type(self.source_count_threshold) is not int or self.source_count_threshold < 1
+        ):
+            raise ValueError("source_count_threshold must be a positive integer")  # noqa: TRY003
 
 
 class _WorkerResultSender(Protocol):
@@ -402,6 +412,7 @@ class _FamilyState:
     next_schedule_at: float | None = None
     next_discovery_at: float = 0.0
     automatic_next: bool = False
+    count_only_scan: bool = False
     overflow_not_before: float = 0.0
     degraded: bool = False
     completed: int = 0
@@ -448,6 +459,7 @@ class ArtifactProcessingSupervisor:
         self._intents = intents or ArtifactProcessingIntentRepository()
         self._leases = leases or ArtifactProcessingLeaseRepository()
         self._binding_states = binding_states or ArtifactProcessingBindingStateRepository()
+        self._cursors = SourceCursorRepository()
         self.holder_id = holder_id or str(uuid4())
         self._tick = oceanbase_tick_seconds
         self._lease_seconds = oceanbase_lease_seconds
@@ -712,10 +724,15 @@ class ArtifactProcessingSupervisor:
         next_schedule_at = state.next_schedule_at
         next_discovery_at = state.next_discovery_at
         admitted: list[str] = []
+        threshold = binding.source_count_threshold
         async with self._database.transaction() as connection:
             await self._leases.require_fence(connection, self._require_current_fence())
             persisted = await self._binding_states.load(connection, binding.binding_name, for_update=True)
-            enabled = binding.automatic_processing_interval is not None or binding.cron is not None
+            enabled = (
+                binding.automatic_processing_interval is not None
+                or binding.cron is not None
+                or threshold is not None
+            )
             if not enabled:
                 if persisted is not None and persisted.scan_in_progress:
                     await self._binding_states.finish_scan(connection, binding.binding_name)
@@ -725,8 +742,25 @@ class ArtifactProcessingSupervisor:
                 now = await database_utc_now(connection)
                 if persisted is None or not persisted.scan_in_progress:
                     checkpoint = None if persisted is None else persisted.last_schedule_checkpoint_at
-                    due, next_time = _schedule_deadline(binding, checkpoint, now)
-                    next_schedule_at = asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
+                    if binding.automatic_processing_interval is None and binding.cron is None:
+                        # A count-only Family has no time deadline: poll for a
+                        # scope that crossed its threshold on the next tick.
+                        due = None
+                        next_schedule_at = asyncio.get_running_loop().time() + self._tick
+                    else:
+                        due, next_time = _schedule_deadline(binding, checkpoint, now)
+                        next_schedule_at = asyncio.get_running_loop().time() + max(
+                            0, (next_time - now).total_seconds()
+                        )
+                    if due is None and threshold is not None:
+                        ready = await self._count_ready_scopes(connection, binding, threshold)
+                        if ready:
+                            due = now
+                            state.count_only_scan = True
+                        else:
+                            state.count_only_scan = False
+                    elif due is not None:
+                        state.count_only_scan = False
                     if due is not None:
                         persisted = await self._binding_states.start_scan(connection, binding.binding_name, due)
                         scan_after = 0
@@ -760,6 +794,10 @@ class ArtifactProcessingSupervisor:
                         scan_after = row.pending_sequence
                         if row.scope_id not in eligible:
                             continue
+                        if state.count_only_scan and threshold is not None:
+                            pending = await self._scope_pending(connection, row.scope_id, binding)
+                            if pending < threshold:
+                                continue
                         await self._intents.admit(
                             connection, row.scope_id, binding.binding_name, persisted.scan_generation
                         )
@@ -771,7 +809,9 @@ class ArtifactProcessingSupervisor:
                         # Starting a scan established its checkpoint, so a
                         # completed page must not restart the interval here.
                         _, next_time = _schedule_deadline(binding, persisted.last_schedule_checkpoint_at, now)
-                        next_schedule_at = asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
+                        next_schedule_at = asyncio.get_running_loop().time() + max(
+                            0, (next_time - now).total_seconds()
+                        )
                     else:
                         next_discovery_at = asyncio.get_running_loop().time() + _DISCOVERY_PAGE_DELAY_SECONDS
         state.scan_after = scan_after
@@ -781,6 +821,37 @@ class ArtifactProcessingSupervisor:
         state.next_discovery_at = next_discovery_at
         for scope in admitted:
             self._enqueue(state, scope)
+
+    async def _count_ready_scopes(
+        self,
+        connection: object,
+        binding: ArtifactProcessingBinding,
+        threshold: int,
+    ) -> frozenset[str]:
+        """Scopes whose unconsumed journal entries already reach the threshold."""
+
+        rows = (await connection.execute(select(SOURCE_JOURNAL_HEADS_TABLE.c.scope_id, SOURCE_JOURNAL_HEADS_TABLE.c.position))).all()  # type: ignore[attr-defined]
+        ready: set[str] = set()
+        for scope, high in rows:
+            if await self._scope_pending(connection, str(scope), binding) >= threshold:  # type: ignore[arg-type]
+                ready.add(str(scope))
+        return frozenset(ready)
+
+    async def _scope_pending(
+        self,
+        connection: object,
+        scope_id: str,
+        binding: ArtifactProcessingBinding,
+    ) -> int:
+        """Entries captured after this Family's last successful cursor."""
+
+        high = await connection.scalar(  # type: ignore[attr-defined]
+            select(SOURCE_JOURNAL_HEADS_TABLE.c.position).where(SOURCE_JOURNAL_HEADS_TABLE.c.scope_id == scope_id)
+        )
+        cursor = await self._cursors.load(connection, scope_id, binding.binding_name)  # type: ignore[arg-type]
+        consumed = 0 if cursor is None else int(cursor.cursor.sequence)
+        return int(high or 0) - consumed
+
 
     @staticmethod
     def _fresh_capacity(state: _FamilyState) -> int:
