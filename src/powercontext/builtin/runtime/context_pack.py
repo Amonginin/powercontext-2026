@@ -27,7 +27,7 @@ CONTEXT_PACK_DELTA_SCHEMA = "powercontext.context-pack-delta.v1"
 DEFAULT_CONTEXT_CHUNK_BYTES = 512
 # Runtime chunks stay small so a delta can keep every shared chunk of a context
 # whose body only changes near the end.
-CONTEXT_PACK_RUNTIME_CHUNK_BYTES = 128
+CONTEXT_PACK_RUNTIME_CHUNK_BYTES = 64
 
 
 class ContextPackError(ValueError):
@@ -61,23 +61,38 @@ class ContextPack:
             raise ContextPackError("context content must be text")
         if isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0:
             raise ContextPackError("chunk_bytes must be a positive integer")
-        data = content.encode("utf-8")
-        chunks: list[bytes] = []
-        start = 0
-        while start < len(data):
-            end = min(start + chunk_bytes, len(data))
-            while end > start:
-                try:
-                    data[start:end].decode("utf-8")
-                except UnicodeDecodeError:
-                    end -= 1
-                    continue
+        return cls.build(_chunk_bytes(content.encode("utf-8"), chunk_bytes))
+
+    @classmethod
+    def after(cls, base: ContextPack, content: str, *, chunk_bytes: int = DEFAULT_CONTEXT_CHUNK_BYTES) -> ContextPack:
+        """Split content so that it keeps the base pack's own chunks for the shared prefix.
+
+        A delta can only say "keep the first *k* chunks of the base and append the rest", so
+        the target has to be chunked the same way as the base. When the caller builds the base
+        with a different chunk size than this method would pick, the two chunk sequences would
+        not line up and no prefix could be reused at all.
+        """
+
+        if not isinstance(content, str):
+            raise ContextPackError("context content must be text")
+        if isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0:
+            raise ContextPackError("chunk_bytes must be a positive integer")
+        base_bytes = b"".join(base.items)
+        target_bytes = content.encode("utf-8")
+        limit = min(len(base_bytes), len(target_bytes))
+        common = 0
+        while common < limit and base_bytes[common] == target_bytes[common]:
+            common += 1
+        keep = 0
+        consumed = 0
+        for item in base.items:
+            if consumed + len(item) > common:
                 break
-            else:
-                raise ContextPackError("chunk_bytes is too small to hold one UTF-8 character")
-            chunks.append(data[start:end])
-            start = end
-        return cls.build(tuple(chunks))
+            keep += 1
+            consumed += len(item)
+        head = base.items[:keep]
+        tail = _chunk_bytes(target_bytes[consumed:], chunk_bytes)
+        return cls.build((*head, *tail))
 
     @property
     def wire_size(self) -> int:
@@ -210,6 +225,27 @@ def apply_context_pack_delta(base: ContextPack, delta: ContextPackDelta) -> Cont
     if target.digest != delta.target_digest:
         raise ContextPackError("delta does not rebuild its target pack")
     return target
+
+
+def _chunk_bytes(data: bytes, chunk_bytes: int) -> tuple[bytes, ...]:
+    """Split bytes into bounded chunks that each stay valid UTF-8."""
+
+    chunks: list[bytes] = []
+    start = 0
+    while start < len(data):
+        end = min(start + chunk_bytes, len(data))
+        while end > start:
+            try:
+                data[start:end].decode("utf-8")
+            except UnicodeDecodeError:
+                end -= 1
+                continue
+            break
+        else:
+            raise ContextPackError("chunk_bytes is too small to hold one UTF-8 character")
+        chunks.append(data[start:end])
+        start = end
+    return tuple(chunks)
 
 
 def _validate_items(items: object) -> tuple[bytes, ...]:

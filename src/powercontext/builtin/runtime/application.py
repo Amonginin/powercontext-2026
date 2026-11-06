@@ -864,7 +864,14 @@ class ScopedContextApplication:
         """
 
         prepared = await self.prepare(request)
-        pack = ContextPack.from_content(prepared.content or "", chunk_bytes=CONTEXT_PACK_RUNTIME_CHUNK_BYTES)
+        if base_pack is None:
+            pack = ContextPack.from_content(prepared.content or "", chunk_bytes=CONTEXT_PACK_RUNTIME_CHUNK_BYTES)
+        else:
+            pack = ContextPack.after(
+                base_pack,
+                prepared.content or "",
+                chunk_bytes=CONTEXT_PACK_RUNTIME_CHUNK_BYTES,
+            )
         if base_pack is None:
             return pack
         return ContextPackDelta.between(base_pack, pack)
