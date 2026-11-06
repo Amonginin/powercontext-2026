@@ -125,6 +125,14 @@ class SourceLifecycleService:
         _require_identifier(node_id)
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise SourceLifecycleError("revision must be a positive integer")
+        async with self._runtime._context(self._scope_id) as context:
+            try:
+                catalog = context.sources.catalog
+                readable = any(catalog.as_ref(source) == source_ref for source in await context.sources.list())
+            except Exception as error:  # noqa: BLE001 - one contract for any unreadable reference
+                raise SourceLifecycleError("source reference must be readable") from error
+            if not readable:
+                raise SourceLifecycleError("source reference must be readable")
         node = _Node(
             node_id=node_id,
             kind="source",
@@ -218,6 +226,10 @@ class SourceLifecycleService:
         if event.sequence == node.sequence:
             if node.available != event.available or node.reason != event.reason:
                 raise SourceLifecycleError("same sequence with a different event")
+            # A retried event must finish the propagation an earlier attempt left
+            # interrupted; the sync is idempotent and adds no Memory revision once
+            # the native state already matches.
+            await self._sync_native(nodes)
             return sorted(_active_ids(nodes))
         node.sequence = event.sequence
         node.available = event.available
