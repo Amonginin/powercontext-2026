@@ -176,7 +176,7 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be a positive integer")  # noqa: TRY003
 
-    pool = min(max(limit * 5, limit), _MAX_CANDIDATE_POOL)
+    pool = min(max(limit * 15, limit), _MAX_CANDIDATE_POOL)
     literal = analyze_fts_query(question) or question
     primary = await memory.search(SearchMemoryRequest(query=literal, mode="fts", limit=pool))
     rankings: list[tuple[float, tuple[MemoryHit, ...]]] = [(1.0, primary.hits)]
@@ -184,6 +184,18 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     if expanded is not None:
         secondary = await memory.search(SearchMemoryRequest(query=expanded, mode="fts", limit=pool))
         rankings.append((0.5, secondary.hits))
+    # Long questions carry weak words ("has", "any", the company name) that every
+    # page matches, and the question's own noun may not be the filing's word at
+    # all ("legal battles" is "litigation" in a report). Ask again with the few
+    # long reporting terms alone: they are rare enough that the section page
+    # which names the concept ranks at the top instead of below a hundred pages
+    # that merely repeat the common words.
+    sharp = _sharp_terms(expanded, literal)
+    if sharp:
+        focused = await memory.search(SearchMemoryRequest(query=sharp, mode="fts", limit=pool))
+        # Only the head of this ranking carries the precise concept; its tail is
+        # every page that happens to repeat one long word.
+        rankings.append((3.0, focused.hits[:_FOCUSED_HEAD]))
 
     scores: dict[tuple[str, str], float] = {}
     hits_by_key: dict[tuple[str, str], MemoryHit] = {}
@@ -233,6 +245,11 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             words = page_words[key]
             coverage = _best_window_coverage(words, terms, weights, weight_total)
             scores[key] += coverage * _COVERAGE_WEIGHT
+            # A section heading is the strongest structural signal a filing page
+            # offers: "Item 3. Legal Proceedings" answers a question about
+            # litigation even though a risk-factor paragraph repeats more terms.
+            if terms & set(words[:_HEADING_WORDS]):
+                scores[key] += _HEADING_BONUS
             if pairs:
                 phrase_hits = len(_window_bigrams(words, terms) & pairs)
                 if phrase_hits:
@@ -255,7 +272,7 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
 
 
 _FUSION_CONSTANT = 60
-_MAX_CANDIDATE_POOL = 200
+_MAX_CANDIDATE_POOL = 300
 _COVERAGE_WEIGHT = 0.05
 _FIGURE_BONUS = 0.01
 _PHRASE_BONUS = 0.015
@@ -263,6 +280,10 @@ _EXPANSION_WEIGHT = 0.4
 _FIGURE_PATTERN = re.compile(r"\d")
 _WINDOW_WORDS = 90
 _WINDOW_STRIDE = 45
+_HEADING_WORDS = 32
+_HEADING_BONUS = 0.02
+_SHARP_TERM_COUNT = 2
+_FOCUSED_HEAD = 5
 
 # How a question names a thing versus how a filing labels it. These are generic
 # reporting terms, not answers: they only widen the lexical evidence terms so a
@@ -295,6 +316,25 @@ _REPORTING_SYNONYMS: dict[str, tuple[str, ...]] = {
     "lease": ("leases", "rent", "obligations", "operating"),
     "goodwill": ("impairment", "intangible", "reporting", "unit"),
 }
+
+
+def _sharp_terms(expanded: str | None, literal: str) -> str | None:
+    """The long reporting terms that name the concept precisely.
+
+    A long word in this domain ("litigation", "proceedings", "restructuring",
+    "depreciation") is specific enough to rank its own section page, while the
+    question's phrasing may never appear in the filing at all.
+    """
+
+    if expanded is None:
+        return None
+    literal_terms = set(literal.split())
+    sharp = [
+        term
+        for term in dict.fromkeys(expanded.split())
+        if len(term) >= 9 and term not in literal_terms and not term.isdigit()
+    ]
+    return " ".join(sharp[:_SHARP_TERM_COUNT]) or None
 
 
 def _window_bigrams(words: list[str], terms: set[str]) -> set[tuple[str, str]]:
