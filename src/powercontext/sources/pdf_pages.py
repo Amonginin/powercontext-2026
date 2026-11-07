@@ -196,6 +196,23 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
         # Only the head of this ranking carries the precise concept; its tail is
         # every page that happens to repeat one long word.
         rankings.append((3.0, focused.hits[:_FOCUSED_HEAD]))
+    # A question asks about a metric ("quick ratio", "gross margin") that a filing
+    # never names: it shows the line items instead. Ask the line-item phrases the
+    # metric is computed from, so the statement page enters the candidate pool.
+    statement_keys: set[tuple[str, str]] = set()
+    for phrase in _statement_terms(question):
+        statement = await memory.search(SearchMemoryRequest(query=phrase, mode="fts", limit=_STATEMENT_POOL))
+        head = statement.hits[:_STATEMENT_HEAD]
+        statement_keys.update((hit.entry_id, hit.entry_version_id) for hit in head)
+        rankings.append((_STATEMENT_WEIGHT, head))
+    # Admission needs two matching query terms, so a page that names the concept
+    # with a single word the question also used never reaches the pool at all.
+    # Ask each evidence term on its own: a one-term query lowers that floor to
+    # one. The weight stays below the literal ranking so the wide net widens
+    # recall without outvoting the pages that already agree on several terms.
+    for term in _single_terms(literal):
+        single = await memory.search(SearchMemoryRequest(query=term, mode="fts", limit=_SINGLE_POOL))
+        rankings.append((_SINGLE_WEIGHT, single.hits[:_SINGLE_HEAD]))
 
     scores: dict[tuple[str, str], float] = {}
     hits_by_key: dict[tuple[str, str], MemoryHit] = {}
@@ -205,6 +222,10 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             scores[key] = scores.get(key, 0.0) + weight / (_FUSION_CONSTANT + rank)
             hits_by_key.setdefault(key, hit)
 
+    # A page that the metric's own line items retrieved is a strong candidate even
+    # when the rerank coverage cannot see the question's words on it.
+    for key in statement_keys:
+        scores[key] += _STATEMENT_HIT_BONUS
     # A report page that answers a question usually carries several of the asked
     # terms and the figures they describe. Reward that shape on top of the coarse
     # ranking so a dense statement page can outrank a short page that merely
@@ -238,6 +259,7 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
         }
         weight_total = sum(weights.values())
         pairs = set(zip(literal_terms, literal_terms[1:], strict=False))
+        metric_question = _is_metric_question(question)
         for key, hit in hits_by_key.items():
             # Score the best passage rather than the whole page: a running header
             # or a table of contents repeats on every page and would otherwise
@@ -250,6 +272,12 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             # litigation even though a risk-factor paragraph repeats more terms.
             if terms & set(words[:_HEADING_WORDS]):
                 scores[key] += _HEADING_BONUS
+            # A metric question ("quick ratio", "effective tax rate") is answered
+            # by a primary statement whose title never repeats the question's
+            # words. The statement title is the structural signal that survives
+            # that vocabulary gap.
+            if metric_question and _STATEMENT_TITLE.search(hit.text):
+                scores[key] += _STATEMENT_TITLE_BONUS
             if pairs:
                 phrase_hits = len(_window_bigrams(words, terms) & pairs)
                 if phrase_hits:
@@ -302,6 +330,66 @@ _HEADING_BONUS = 0.02
 _SHARP_TERM_COUNT = 2
 _FOCUSED_HEAD = 5
 _FILL_TERMS = 4
+_SINGLE_WEIGHT = 0.6
+_SINGLE_HEAD = 10
+_SINGLE_POOL = 40
+_SINGLE_TERMS = 6
+_STATEMENT_WEIGHT = 2.0
+_STATEMENT_HEAD = 16
+_STATEMENT_HIT_BONUS = 0.02
+_STATEMENT_POOL = 40
+_STATEMENT_MAX = 4
+_STATEMENT_TITLE_BONUS = 0.07
+
+# Metric -> the statement line items it is computed from. A filing states the
+# line items, never the ratio, so the ratio has to be translated to be searchable.
+# Each phrase was checked against a real filing page before being listed here.
+_STATEMENT_METRICS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("quick ratio", "current ratio", "liquidity"),
+        ("current assets", "current liabilities", "total assets"),
+    ),
+    (
+        ("gross margin", "gross profit margin"),
+        ("gross profit", "cost of sales", "net sales"),
+    ),
+    (
+        ("operating margin", "ebit margin"),
+        ("operating income", "net income", "revenues"),
+    ),
+    (
+        ("liabilit", "leverage"),
+        ("total liabilities", "balance sheet", "shareholders equity"),
+    ),
+    (
+        ("card member", "attrition", "retention"),
+        ("card members", "retention"),
+    ),
+    (
+        ("segment", "geograph"),
+        ("segment",),
+    ),
+    (
+        ("cyclical",),
+        ("cyclical",),
+    ),
+    (
+        ("customer",),
+        ("customers", "accounts receivable"),
+    ),
+    (
+        ("tax rate", "effective tax"),
+        ("income tax", "provision", "pre tax income"),
+    ),
+    (
+        ("categor", "product line", "service line"),
+        ("segment", "products"),
+    ),
+    (
+        ("ebitda", "capex", "cash flow"),
+        ("cost of sales", "net income", "cash flows"),
+    ),
+)
 
 # How a question names a thing versus how a filing labels it. These are generic
 # reporting terms, not answers: they only widen the lexical evidence terms so a
@@ -334,6 +422,71 @@ _REPORTING_SYNONYMS: dict[str, tuple[str, ...]] = {
     "lease": ("leases", "rent", "obligations", "operating"),
     "goodwill": ("impairment", "intangible", "reporting", "unit"),
 }
+
+
+def _single_terms(literal: str) -> tuple[str, ...]:
+    """The evidence terms worth asking for alone, longest first.
+
+    A long term is a rarer one in a filing, so one word carries more of the
+    question's meaning than the short words around it.
+    """
+
+    candidates = [
+        term
+        for term in dict.fromkeys(literal.split())
+        if len(term) >= 4 and not term.isdigit()
+    ]
+    return tuple(sorted(candidates, key=lambda term: -len(term))[:_SINGLE_TERMS])
+
+
+_STATEMENT_TITLE = re.compile(
+    r"consolidated\s+("
+    r"statements?\s+of\s+(operations|income|comprehensive\s+income|cash\s+flows|financial\s+position"
+    r"|changes\s+in\s+(equity|stockholders)"
+    r")"
+    r"|balance\s+sheets?"
+    r")",
+    re.IGNORECASE,
+)
+_METRIC_WORDS = (
+    "ratio",
+    "margin",
+    "expense",
+    "tax",
+    "liabilit",
+    "asset",
+    "cash flow",
+    "ebitda",
+    "capex",
+    "depreciation",
+    "amortization",
+    "goodwill",
+    "inventory",
+    "profit",
+)
+
+
+def _is_metric_question(question: str) -> bool:
+    """Whether the question asks for a figure that lives on a primary statement."""
+
+    lowered = question.casefold()
+    return any(word in lowered for word in _METRIC_WORDS)
+
+
+def _statement_terms(question: str) -> tuple[str, ...]:
+    """The statement line items a metric question is computed from.
+
+    A filing never prints "quick ratio"; it prints the current assets and current
+    liabilities the ratio is built from. Asking for those phrases is what brings
+    the statement page into the pool at all.
+    """
+
+    lowered = question.casefold()
+    phrases: list[str] = []
+    for triggers, terms in _STATEMENT_METRICS:
+        if any(trigger in lowered for trigger in triggers):
+            phrases.extend(terms)
+    return tuple(dict.fromkeys(phrases))[:_STATEMENT_MAX]
 
 
 def _sharp_terms(expanded: str | None, literal: str) -> str | None:
