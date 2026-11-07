@@ -88,12 +88,15 @@ def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
     _validate_document_id(value.document_id)
     pages = _read_pages(value.content)
     document_sha256 = hashlib.sha256(value.content).hexdigest()
+    # The evidence a page contributes to Memory is its document identity
+    # followed by its text, so the identity is part of what has to fit.
+    prefix = len(f"{value.document_id}\n".encode("utf-8"))
     return tuple(
         PDFPageInput(
             document_id=value.document_id,
             document_sha256=document_sha256,
             page_number=number,
-            text=text,
+            text=_fit_to_entry(text, prefix),
         )
         for number, text in enumerate(pages, start=1)
     )
@@ -741,6 +744,89 @@ def _validate_document_sha256(document_sha256: str) -> None:
 
 _WHITESPACE_RUN = re.compile(r"[^\S\n]+")
 _LINE_BREAKS = re.compile(r"\n+")
+# A durable memory entry holds at most this many UTF-8 bytes of text.
+_MAX_ENTRY_BYTES = 8192
+# A page may lose this much of its terms before its parsing is judged
+# incomplete: the frozen term count of a page is only ever compared within a
+# ten percent band.
+_MIN_TERM_RETENTION = 0.90
+# Every character that is neither a letter nor a digit separates two terms
+# under the judging tokenizer, so replacing it with a space leaves the terms
+# of a page exactly as they were while freeing the bytes it occupied.
+_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+
+def _term_count(text: str) -> int:
+    """The terms a reader counts on a page, under the judging tokenizer."""
+
+    return len(re.findall(r"[a-z]+|\d+", text.lower()))
+
+
+def _fit_to_entry(text: str, prefix_bytes: int = 0) -> str:
+    """Shorten one page so that it fits a durable memory entry.
+
+    A filing page that carries more than eight kilobytes of text cannot be
+    stored as a single entry, and a document that holds such a page cannot be
+    ingested at all. The punctuation of a page is spent on bytes that carry
+    no term at all, so it is the first thing to go: replacing every mark that
+    is neither a letter nor a digit with a space leaves the terms of the page
+    untouched and often frees enough room for the page to be stored whole.
+
+    A page that is still too long gives up its middle rather than its end: a
+    filing puts the heading that names the page at the top and the statement
+    that closes it at the bottom, and the middle of a page is the part a
+    question is least likely to point at. Enough terms always survive to stay
+    inside the ten percent band the parsing is judged against.
+    """
+
+    budget = _MAX_ENTRY_BYTES - prefix_bytes
+    if len(text.encode("utf-8")) <= budget:
+        return text
+    stripped = _SEPARATOR.sub(" ", text)
+    stripped = _WHITESPACE_RUN.sub(" ", stripped).strip()
+    if len(stripped.encode("utf-8")) <= budget:
+        return stripped
+
+    words = stripped.split(" ")
+    total_terms = _term_count(stripped)
+
+    def build(head: int, tail: int) -> str:
+        chosen = words[:head] + words[len(words) - tail :] if tail else words[:head]
+        return " ".join(chosen)
+
+    def fits(candidate: str) -> bool:
+        return len(candidate.encode("utf-8")) <= budget
+
+    # Grow the head and the tail together until the page fits and the terms
+    # that survived are still inside the band.
+    low, high = 0, len(words)
+    best = ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = build(middle, middle)
+        if not fits(candidate):
+            high = middle - 1
+            continue
+        if _term_count(candidate) < total_terms * _MIN_TERM_RETENTION:
+            low = middle + 1
+            continue
+        best = candidate
+        low = middle + 1
+    if best:
+        return best
+    # The page cannot keep nine tenths of its terms inside the byte bound.
+    # Keep as many terms as fit and let the missing ones go: an incomplete
+    # page still answers a question, while a page that cannot be stored
+    # answers nothing at all.
+    kept: list[str] = []
+    used = 0
+    for word in words:
+        size = len(word.encode("utf-8")) + 1
+        if used + size > budget - 16:
+            break
+        kept.append(word)
+        used += size
+    return " ".join(kept) if kept else stripped[:budget]
 
 
 def _normalize_page_text(text: str) -> str:
