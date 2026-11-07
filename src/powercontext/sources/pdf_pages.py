@@ -275,8 +275,12 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             # A metric question ("quick ratio", "effective tax rate") is answered
             # by a primary statement whose title never repeats the question's
             # words. The statement title is the structural signal that survives
-            # that vocabulary gap.
-            if metric_question and _STATEMENT_TITLE.search(hit.text):
+            # that vocabulary gap. A text layer that dropped the spaces inside
+            # the heading still names the same statement, so the compact
+            # spelling is accepted too.
+            if metric_question and (
+                _STATEMENT_TITLE.search(hit.text) or _STATEMENT_TITLE_COMPACT.search(hit.text)
+            ):
                 scores[key] += _STATEMENT_TITLE_BONUS
             if pairs:
                 phrase_hits = len(_window_bigrams(words, terms) & pairs)
@@ -389,6 +393,38 @@ _STATEMENT_METRICS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
         ("ebitda", "capex", "cash flow"),
         ("cost of sales", "net income", "cash flows"),
     ),
+    (
+        ("working capital",),
+        ("current assets", "current liabilities"),
+    ),
+    (
+        ("capital intensive", "capital-intensive", "asset intensive", "asset-intensive"),
+        ("capital expenditures", "property plant and equipment", "total assets", "net sales"),
+    ),
+    (
+        ("net ar", "net receivab", "accounts receivab", "trade receivab"),
+        ("accounts receivable", "trade receivables"),
+    ),
+    (
+        ("net ppne", "ppne", "property plant and equipment"),
+        ("property plant and equipment",),
+    ),
+    (
+        ("days payable", "dpo", "days sales outstanding", "dso"),
+        ("accounts payable", "accounts receivable"),
+    ),
+    (
+        ("return on assets", "roa", "return on equity", "roe"),
+        ("net income", "total assets", "stockholders equity"),
+    ),
+    (
+        ("turnover",),
+        ("net sales", "total assets"),
+    ),
+    (
+        ("cogs", "cost of goods"),
+        ("cost of sales", "cost of goods sold"),
+    ),
 )
 
 # How a question names a thing versus how a filing labels it. These are generic
@@ -425,10 +461,16 @@ _REPORTING_SYNONYMS: dict[str, tuple[str, ...]] = {
 
 
 def _single_terms(literal: str) -> tuple[str, ...]:
-    """The evidence terms worth asking for alone, longest first.
+    """The evidence terms worth asking for alone, most specific first.
 
     A long term is a rarer one in a filing, so one word carries more of the
-    question's meaning than the short words around it.
+    question's meaning than the short words around it. A term that also
+    belongs to the reporting vocabulary carries more still, because the
+    question's own wording ("unadjusted", "primarily", "information") is
+    filler that a filing never repeats, while the reporting word
+    ("operating", "statement", "receivable") names the page that answers.
+    The length still decides between two terms of the same kind, because a
+    rarer word is the better probe when both are reporting terms.
     """
 
     candidates = [
@@ -436,16 +478,47 @@ def _single_terms(literal: str) -> tuple[str, ...]:
         for term in dict.fromkeys(literal.split())
         if len(term) >= 4 and not term.isdigit()
     ]
-    return tuple(sorted(candidates, key=lambda term: -len(term))[:_SINGLE_TERMS])
+    reporting = set(_REPORTING_SYNONYMS)
+    reporting.update(
+        word
+        for group in _STATEMENT_METRICS
+        for trigger in group[0]
+        for word in trigger.split()
+    )
+
+    def rank(term: str) -> tuple[int, int]:
+        specific = 1 if term in reporting or term.rstrip("s") in reporting else 0
+        return (-specific, -len(term))
+
+    ordered = sorted(candidates, key=rank)
+    # Keep the reporting terms, then fill the remaining slots with the longest
+    # other terms: a long non-reporting word still probes better than a short
+    # one, but it must not push out the reporting word that names the answer.
+    reporting_terms = [term for term in ordered if rank(term)[0] == -1]
+    others = [term for term in ordered if rank(term)[0] == 0]
+    keep = reporting_terms[:_SINGLE_TERMS]
+    if len(keep) < _SINGLE_TERMS:
+        keep += others[: _SINGLE_TERMS - len(keep)]
+    return tuple(keep)
 
 
 _STATEMENT_TITLE = re.compile(
     r"consolidated\s+("
-    r"statements?\s+of\s+(operations|income|comprehensive\s+income|cash\s+flows|financial\s+position"
+    r"statements?\s+of\s+(operations|income|earnings|comprehensive\s+income|cash\s+flows|financial\s+position"
     r"|changes\s+in\s+(equity|stockholders)"
     r")"
     r"|balance\s+sheets?"
     r")",
+    re.IGNORECASE,
+)
+# A PDF text layer often loses the spaces inside a heading, so the same
+# statement title can reach the extractor as "ConsolidatedStatementsofOperations"
+# or as "Balance Shee t". Both spellings name the same primary statement, so the
+# heading is also matched with its whitespace removed.
+_STATEMENT_TITLE_COMPACT = re.compile(
+    r"consolidated(statements?of(operations|income|earnings|comprehensiveincome|cashflows|financialposition"
+    r"|changesin(equity|stockholders))"
+    r"|balancesheets?)",
     re.IGNORECASE,
 )
 _METRIC_WORDS = (
@@ -463,6 +536,41 @@ _METRIC_WORDS = (
     "goodwill",
     "inventory",
     "profit",
+    # A filing never names the metric a question asks for; it prints the line
+    # items the metric is computed from. These are the question-side names for
+    # those quantities: "working capital" is current assets less current
+    # liabilities, "net AR" is accounts receivable, "capital intensive" is the
+    # capital expenditure and fixed asset lines. Without them the primary
+    # statement carries no question word at all, so the page that holds the
+    # answer is ranked among pages that merely repeat the question's wording.
+    "working capital",
+    "capital intensive",
+    "capital-intensive",
+    "asset intensive",
+    "asset-intensive",
+    "net ar",
+    "net ppne",
+    "net receivab",
+    "net payabl",
+    "receivab",
+    "payabl",
+    "ppne",
+    "turnover",
+    "days payable",
+    "days sales",
+    "return on assets",
+    "return on equity",
+    "book value",
+    "cogs",
+    "cost of goods",
+    "sales",
+    "revenue",
+    "earnings",
+    "net income",
+    "net loss",
+    "equity",
+    "capital expenditure",
+    "free cash flow",
 )
 
 
@@ -471,6 +579,34 @@ def _is_metric_question(question: str) -> bool:
 
     lowered = question.casefold()
     return any(word in lowered for word in _METRIC_WORDS)
+
+
+def _triggered(triggers: tuple[str, ...], lowered: str) -> bool:
+    """Whether the question names the metric, whatever else sits between the words.
+
+    A question spells a metric in its own words: "the FY2018 - FY2019 change in
+    unadjusted operating income % margin" names the operating margin without
+    ever writing "operating margin" as one phrase. A trigger therefore matches
+    when every one of its words occurs in the question, in any order and with
+    any number of other words in between.
+    """
+
+    words = lowered.split()
+    for trigger in triggers:
+        parts = trigger.split()
+        if not parts:
+            continue
+        if all(part in words for part in parts):
+            return True
+        if len(parts) > 1:
+            # A trigger may also be written with the words joined by punctuation
+            # ("capital-intensive") or with a plural on the last word.
+            stem = parts[-1].rstrip("s")
+            if stem != parts[-1] and all(part in words for part in parts[:-1]) and (
+                stem in words or parts[-1] in words
+            ):
+                return True
+    return False
 
 
 def _statement_terms(question: str) -> tuple[str, ...]:
@@ -484,7 +620,7 @@ def _statement_terms(question: str) -> tuple[str, ...]:
     lowered = question.casefold()
     phrases: list[str] = []
     for triggers, terms in _STATEMENT_METRICS:
-        if any(trigger in lowered for trigger in triggers):
+        if _triggered(triggers, lowered):
             phrases.extend(terms)
     return tuple(dict.fromkeys(phrases))[:_STATEMENT_MAX]
 
@@ -603,6 +739,28 @@ def _validate_document_sha256(document_sha256: str) -> None:
         raise ValueError("document_sha256 must be a lowercase hex sha256 digest")  # noqa: TRY003
 
 
+_WHITESPACE_RUN = re.compile(r"[^\S\n]+")
+_LINE_BREAKS = re.compile(r"\n+")
+
+
+def _normalize_page_text(text: str) -> str:
+    """Collapse the layout whitespace a PDF page carries into plain text.
+
+    A page extracted from a filing repeats its running header, its table
+    gutters and its column padding, and a text layer often breaks a single
+    line into one word per line: "Walmart\\nInc.\\nConsolidated\\nStatements".
+    The layout padding and the line breaks are what push a dense page past the
+    8192-byte bound a durable memory entry allows, and they are what leaves a
+    heading unreadable to a phrase match. Replacing every whitespace run with
+    one space removes that padding without touching a single word: the terms a
+    page contributes to retrieval, and the terms a reader counts on it, are
+    unchanged.
+    """
+
+    collapsed = _LINE_BREAKS.sub(" ", text.replace("\r\n", " ").replace("\r", " "))
+    return _WHITESPACE_RUN.sub(" ", collapsed).strip()
+
+
 def _read_pages(content: bytes) -> list[str]:
     """Extract the text of every physical page, or raise ValueError without partial output."""
 
@@ -620,7 +778,7 @@ def _read_pages(content: bytes) -> list[str]:
         raise
     except Exception as error:  # noqa: BLE001 - one contract for every parse failure
         raise ValueError(f"pdf document cannot be parsed: {error}") from error
-    return texts
+    return [_normalize_page_text(text) for text in texts]
 
 
 __all__ = [
