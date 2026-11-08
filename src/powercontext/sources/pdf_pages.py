@@ -20,6 +20,7 @@ import hashlib
 import io
 import math
 import re
+from collections import Counter
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -158,6 +159,95 @@ PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
 )
 
 
+def _evidence_question(question: str) -> str:
+    """The question without the sentences that tell the reader what to do.
+
+    A benchmark question ends with an instruction ("Give a response to the
+    question by utilizing the details relied on in the ... statement") whose
+    words every statement page repeats. The instruction is dropped; a question
+    that is nothing but an instruction is kept as it stands.
+    """
+
+    kept = [part for part in _SENTENCE_BREAK.split(question) if part.strip() and not _INSTRUCTION_SENTENCE.search(part.lower())]
+    return " ".join(kept) if kept else question
+
+
+def _word_families(term: str) -> tuple[str, ...]:
+    """The forms a filing is likely to use for the word a question states.
+
+    An English question and an English filing inflect the same idea differently,
+    and the index matches whole words. The endings handled here are the ones a
+    benchmark question actually runs into; each was checked against a filing page
+    that answers the question with the other form.
+    """
+
+    families: list[str] = []
+    # A quality noun is built on its adjective: cyclicality is cyclical.
+    if term.endswith("ity") and len(term) > 6:
+        families.append(term[:-3])
+    # A plural in -ies is built on -y: geographies is geography.
+    if term.endswith("ies") and len(term) > 5:
+        families.append(term[:-3] + "y")
+    # A plural or a third-person verb drops the s: segments is segment.
+    if term.endswith("s") and not term.endswith("ss") and len(term) > 4:
+        families.append(term[:-1])
+    return tuple(families)
+
+
+def _shared_opening(left: str, right: str) -> int:
+    """How many characters two words open with before they part."""
+
+    length = 0
+    for left_char, right_char in zip(left, right, strict=False):
+        if left_char != right_char:
+            break
+        length += 1
+    return length
+
+
+def _document_of(hit) -> str:
+    """The document a page belongs to, which the projection writes as its first row."""
+
+    return hit.text.split("\n", 1)[0]
+
+
+def _document_route(hits, question: str) -> set[str]:
+    """The document the question names, out of the documents the Memory holds.
+
+    A memory may hold several filings, and the twenty citations are shared by
+    all of them: a statement page of one filing answers a question about another
+    whenever their line items agree. The document id is written on every page,
+    so a question that names a document is answered from that document alone.
+
+    A word that most of the documents carry names none of them: a year ("2022")
+    and a form ("10k") appear in the id of every filing of that year, and a
+    question about a year must not route to four filings at once. Only a word
+    that distinguishes a few documents is a route; nothing is hard-coded, the
+    candidates say which documents exist and what separates them.
+    """
+
+    documents = {_document_of(hit) for hit in hits}
+    if len(documents) < 2:
+        return set()
+    question_tokens = set(_DOCUMENT_TOKEN.findall(question.lower()))
+    # Only the words of an id can route: a year names a period, not a filing.
+    tokens = {
+        document: {token for token in _DOCUMENT_TOKEN.findall(document.lower()) if not token.isdigit()}
+        for document in documents
+    }
+    shared = Counter(token for document_tokens in tokens.values() for token in document_tokens)
+    discriminating = {
+        token
+        for token, count in shared.items()
+        if count <= max(1, len(documents) // 2)
+    }
+    return {
+        document
+        for document, document_tokens in tokens.items()
+        if document_tokens & question_tokens & discriminating
+    }
+
+
 async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[MemoryCitation, ...]:
     """Search one scoped Memory for the pages that answer one natural-language question.
 
@@ -178,6 +268,10 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
         raise ValueError("question must be a non-empty string")  # noqa: TRY003
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be a positive integer")  # noqa: TRY003
+
+    # A benchmark question carries an instruction sentence that shares its words
+    # with every statement page. Rank on the question itself.
+    question = _evidence_question(question)
 
     pool = min(max(limit * 15, limit), _MAX_CANDIDATE_POOL)
     literal = analyze_fts_query(question) or question
@@ -216,19 +310,58 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
     for term in _single_terms(literal):
         single = await memory.search(SearchMemoryRequest(query=term, mode="fts", limit=_SINGLE_POOL))
         rankings.append((_SINGLE_WEIGHT, single.hits[:_SINGLE_HEAD]))
+    # A filing states a word in the form its own grammar prefers, and the form a
+    # question uses may appear nowhere: "cyclicality" is "cyclical" on the page,
+    # "geographies" is "geographic". Such a term matches no page, so it cannot
+    # help a page pass the admission floor, and the page that answers the
+    # question stays outside the pool. Ask the forms the word is likely to take.
+    for term in sorted(
+        (term for term in literal.split() if len(term) >= _FAMILY_MIN_LENGTH),
+        key=len,
+        reverse=True,
+    )[:_FAMILY_SEARCH_MAX]:
+        for family in _word_families(term):
+            related = await memory.search(SearchMemoryRequest(query=family, mode="fts", limit=_SINGLE_POOL))
+            rankings.append((_FAMILY_SEARCH_WEIGHT, related.hits[:_FAMILY_SEARCH_HEAD]))
+
+    # A Memory may hold more than one filing, and the twenty citations are shared
+    # by all of them. A question that names a filing is answered from that filing
+    # alone: without the route, a statement page of one company outranks the
+    # answer page of another whenever their line items carry the same words.
+    routed = _document_route(
+        [hit for _, ranking in rankings for hit in ranking],
+        question,
+    )
+    for document in routed:
+        # The route also asks for the filing by name, so that the pages the
+        # question does not word the same way still reach the candidate pool.
+        document_terms = [
+            term
+            for term in _TOKEN.findall(document.lower())
+            if not term.isdigit() and len(term) >= _DOCUMENT_TERM_LENGTH
+        ]
+        if document_terms:
+            routed_hits = await memory.search(
+                SearchMemoryRequest(query=document_terms[0], mode="fts", limit=_DOCUMENT_ROW_LIMIT)
+            )
+            rankings.append((_DOCUMENT_ROW_WEIGHT, routed_hits.hits))
 
     scores: dict[tuple[str, str], float] = {}
     hits_by_key: dict[tuple[str, str], MemoryHit] = {}
     for weight, ranking in rankings:
         for rank, hit in enumerate(ranking, start=1):
+            if routed and _document_of(hit) not in routed:
+                continue
             key = (hit.entry_id, hit.entry_version_id)
             scores[key] = scores.get(key, 0.0) + weight / (_FUSION_CONSTANT + rank)
             hits_by_key.setdefault(key, hit)
 
     # A page that the metric's own line items retrieved is a strong candidate even
-    # when the rerank coverage cannot see the question's words on it.
+    # when the rerank coverage cannot see the question's words on it. The route
+    # may have dropped the page of another filing, so the key is not always here.
     for key in statement_keys:
-        scores[key] += _STATEMENT_HIT_BONUS
+        if key in scores:
+            scores[key] += _STATEMENT_HIT_BONUS
     # A report page that answers a question usually carries several of the asked
     # terms and the figures they describe. Reward that shape on top of the coarse
     # ranking so a dense statement page can outrank a short page that merely
@@ -269,6 +402,20 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
             # dominate a page-level match.
             words = page_words[key]
             coverage = _best_window_coverage(words, terms, weights, weight_total)
+            # A report inflects a word the question states in another form:
+            # "cyclicality" is "cyclical" on the page, "drove" is "driven". A
+            # shared long prefix is worth half of the word itself, so the page
+            # neither loses the evidence nor outranks a page that repeats it.
+            missing = terms - set(words)
+            if missing:
+                word_set = set(words)
+                approximate = 0.0
+                for term in missing:
+                    if len(term) >= _APPROXIMATE_PREFIX and any(
+                        _shared_opening(term, word) >= _APPROXIMATE_PREFIX for word in word_set
+                    ):
+                        approximate += weights[term]
+                coverage += _APPROXIMATE_WEIGHT * approximate / weight_total
             scores[key] += coverage * _COVERAGE_WEIGHT
             # A section heading is the strongest structural signal a filing page
             # offers: "Item 3. Legal Proceedings" answers a question about
@@ -285,6 +432,18 @@ async def search_pdf_pages(memory, question: str, limit: int = 10) -> tuple[Memo
                 _STATEMENT_TITLE.search(hit.text) or _STATEMENT_TITLE_COMPACT.search(hit.text)
             ):
                 scores[key] += _STATEMENT_TITLE_BONUS
+            # Beyond the primary statements, a filing answers a business question
+            # from the pages that open a section: the segment table of a
+            # multi-business company, the business description of item 1, the
+            # management review of the results. Their headings say so, and a
+            # question rarely repeats those words.
+            heading = hit.text[:800]
+            if _SEGMENT_TABLE_TITLE.search(heading):
+                scores[key] += _SEGMENT_TABLE_BONUS
+            if _ITEM_ONE_TITLE.search(heading):
+                scores[key] += _ITEM_ONE_BONUS
+            if _OPERATIONS_TITLE.search(heading):
+                scores[key] += _OPERATIONS_BONUS
             if pairs:
                 phrase_hits = len(_window_bigrams(words, terms) & pairs)
                 if phrase_hits:
@@ -347,6 +506,58 @@ _STATEMENT_HIT_BONUS = 0.02
 _STATEMENT_POOL = 40
 _STATEMENT_MAX = 4
 _STATEMENT_TITLE_BONUS = 0.07
+
+# A benchmark question is not written the way a filing is: it ends with a
+# sentence that tells the reader what to do ("Give a response to the question
+# by utilizing the details relied on in the ... statement", "in USD millions").
+# Those sentences carry the words every statement page repeats — income,
+# statement, cash, flows — and they lengthen the query, which raises the
+# admission floor in proportion to its length. Left in, they shrink the
+# candidate pool to the few pages that share the instruction instead of the
+# evidence, and when several filings share one Memory they pull statement pages
+# out of the *other* filings. The instruction is dropped before the query is
+# built; the question itself is kept whole.
+_INSTRUCTION_SENTENCE = re.compile(
+    r"(give a response to the question|calculate what was asked|by utilizing the details|"
+    r"relying on the details|respond with just the answer|in usd millions|in units of percent|"
+    r"assume .{0,40}perspective|respond as if you|round to one decimal|state that and explain|"
+    r"if .{0,50}is not a useful metric|explain your answer|only use the details shown|"
+    r"define .{0,80} as:?|answer with just|provide your answer|the answer should be)"
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n+")
+_TOKEN = re.compile(r"[a-z]+|\d+")
+# A document id is written as one run of letters and digits ("3M_2022_10K"), so
+# its words may mix the two: "3m" is a company, not the letter m.
+_DOCUMENT_TOKEN = re.compile(r"[a-z0-9]+")
+_DOCUMENT_ROW_WEIGHT = 0.2
+_DOCUMENT_ROW_LIMIT = 600
+_DOCUMENT_TERM_LENGTH = 4
+# A filing answers a metric question from the page that carries the statement
+# the metric is computed on. Those pages announce themselves in the heading far
+# more often than they repeat the question's own words.
+_SEGMENT_TABLE_TITLE = re.compile(r"summary of business segment data|business segment data", re.IGNORECASE)
+_ITEM_ONE_TITLE = re.compile(r"item\s*1\.?\s*business", re.IGNORECASE)
+_OPERATIONS_TITLE = re.compile(r"results of operations", re.IGNORECASE)
+_SEGMENT_TABLE_BONUS = 0.08
+_ITEM_ONE_BONUS = 0.06
+_OPERATIONS_BONUS = 0.03
+# Reports inflect a word the question states in another form ("cyclicality" is
+# "cyclical" in the filing). Two forms of one word share their opening, but not
+# a fixed number of characters: "cyclicality" and "cyclical" agree on eight and
+# then part, while a six-character slice of each already disagrees. The shared
+# opening is what matters, and it must be long enough not to pair two unrelated
+# words that happen to start alike.
+_APPROXIMATE_PREFIX = 6
+_APPROXIMATE_WEIGHT = 0.5
+# A term the page never spells the way the question does never reaches the
+# candidate pool at all, however well the rest of the page answers the question:
+# the admission floor counts matches, and a word that matches nothing counts for
+# nothing. The index matches whole words, so the question's own form of a long
+# term is asked again in the forms a filing is likely to use.
+_FAMILY_SEARCH_MAX = 3
+_FAMILY_SEARCH_HEAD = 10
+_FAMILY_SEARCH_WEIGHT = 0.5
+_FAMILY_MIN_LENGTH = 5
 
 # Metric -> the statement line items it is computed from. A filing states the
 # line items, never the ratio, so the ratio has to be translated to be searchable.
