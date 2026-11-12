@@ -1,0 +1,403 @@
+app:
+  description: 记忆银行：跨会话记忆养成助手。记住玩家的推理风格、称呼与已排除线索，新会话依然认得。
+  icon: 🗂️
+  icon_background: '#EFF1F5'
+  mode: advanced-chat
+  name: 记忆银行
+  use_icon_as_answer_icon: false
+dependencies: []
+kind: app
+version: 0.1.5
+workflow:
+  conversation_variables: []
+  environment_variables:
+  - description: PowerContext 服务地址
+    id: 4f2b7c10-0001-4a1e-9c31-0d5a1b2e3f40
+    name: POWERCONTEXT_URL
+    selector:
+    - env
+    - POWERCONTEXT_URL
+    value: http://host.docker.internal:8000
+    value_type: string
+  - description: 本应用使用的 scope id，由 scripts/init_scope.sh 产出
+    id: 4f2b7c10-0002-4a1e-9c31-0d5a1b2e3f40
+    name: POWERCONTEXT_SCOPE_ID
+    selector:
+    - env
+    - POWERCONTEXT_SCOPE_ID
+    value: replace-with-scope-id
+    value_type: string
+  - description: PowerContext 访问令牌，留空表示本机 loopback 安装（不启用鉴权）
+    id: 4f2b7c10-0003-4a1e-9c31-0d5a1b2e3f40
+    name: POWERCONTEXT_TOKEN
+    selector:
+    - env
+    - POWERCONTEXT_TOKEN
+    value: ''
+    value_type: secret
+  features:
+    file_upload:
+      allowed_file_extensions: []
+      allowed_file_types: []
+      allowed_file_upload_methods: []
+      enabled: false
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods: []
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        sourceType: start
+        targetType: http-request
+      id: start-source-recall-target
+      source: start
+      sourceHandle: source
+      target: recall
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        sourceType: http-request
+        targetType: code
+      id: recall-source-parse-target
+      source: recall
+      sourceHandle: source
+      target: parse
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        sourceType: code
+        targetType: llm
+      id: parse-source-npc-target
+      source: parse
+      sourceHandle: source
+      target: npc
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        sourceType: llm
+        targetType: answer
+      id: npc-source-answer-target
+      source: npc
+      sourceHandle: source
+      target: answer
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        sourceType: llm
+        targetType: code
+      id: npc-source-extract-target
+      source: npc
+      sourceHandle: source
+      target: extract
+      targetHandle: target
+      type: custom
+    - data:
+        isInIteration: false
+        sourceType: code
+        targetType: http-request
+      id: extract-source-save-target
+      source: extract
+      sourceHandle: source
+      target: save
+      targetHandle: target
+      type: custom
+    nodes:
+    - data:
+        desc: 玩家输入称呼与本局案件编号
+        selected: false
+        title: 开始
+        type: start
+        variables:
+        - allowed_file_extensions: []
+          allowed_file_types: []
+          allowed_file_upload_methods: []
+          label: 案件编号
+          max_length: 64
+          options: []
+          required: true
+          type: text-input
+          variable: case_id
+        - allowed_file_extensions: []
+          allowed_file_types: []
+          allowed_file_upload_methods: []
+          label: 你希望我怎么称呼你
+          max_length: 48
+          options: []
+          required: false
+          type: text-input
+          variable: player_name
+        - allowed_file_extensions: []
+          allowed_file_types: []
+          allowed_file_upload_methods: []
+          label: 推理输入
+          max_length: 4096
+          options: []
+          required: true
+          type: paragraph
+          variable: player_input
+      height: 168
+      id: start
+      position:
+        x: 60
+        y: 280
+      positionAbsolute:
+        x: 60
+        y: 280
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - id: scope-id
+            key: scope_id
+            type: text
+            value: '{{#env.POWERCONTEXT_SCOPE_ID#}}'
+          - id: query
+            key: query
+            type: text
+            value: '{{#start.case_id#}} {{#start.player_name#}} 推理 线索 称呼 偏好 已排除'
+          type: json
+        desc: 从 PowerContext 召回该玩家在本案的既往记忆
+        headers: ''
+        method: post
+        params: ''
+        retry_config:
+          exponential_backoff:
+            enabled: false
+            max_interval: 10000
+            multiplier: 2
+          max_retries: 2
+          retry_enabled: true
+          retry_interval: 1000
+        selected: false
+        timeout:
+          connect: 10
+          read: 30
+          write: 30
+        title: 召回记忆
+        type: http-request
+        url: '{{#env.POWERCONTEXT_URL#}}/v1/memory/search'
+        variables: []
+      height: 96
+      id: recall
+      position:
+        x: 360
+        y: 280
+      positionAbsolute:
+        x: 360
+        y: 280
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        code: "import json\n\ndef main(body: str) -> dict:\n    \"\"\"把 PowerContext 的检索结果整理成一段可直接注入提示词的文字。\"\"\"\n    try:\n        payload = json.loads(body) if body else {}\n    except Exception:\n        payload = {}\n    hits = payload.get(\"hits\") or []\n    lines = []\n    for idx, hit in enumerate(hits[:8]):\n        text = (hit.get(\"text\") or \"\").strip()\n        if not text:\n            continue\n        try:\n            score = float(hit.get(\"score\") or 0.0)\n        except Exception:\n            score = 0.0\n        lines.append(\"- [%s] %s\" % (round(score, 3), text[:400]))\n    if not lines:\n        memory_block = \"（记忆库中没有与本案相关的记录，这可能是你们第一次合作。）\"\n    else:\n        memory_block = \"\\n\".join(lines)\n    return {\"memory_block\": memory_block, \"hit_count\": len(lines)}\n"
+        code_language: python3
+        desc: 解析检索结果，生成记忆块
+        outputs:
+          hit_count:
+            type: number
+          memory_block:
+            type: string
+        selected: false
+        title: 解析记忆
+        type: code
+        variables:
+        - value_selector:
+          - recall
+          - body
+          variable: body
+      height: 54
+      id: parse
+      position:
+        x: 660
+        y: 280
+      positionAbsolute:
+        x: 660
+        y: 280
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: 侦探 NPC，结合召回的记忆作答
+        memory:
+          query_prompt_template: '{{#sys.query#}}'
+          role_prefix:
+            assistant: ''
+            user: ''
+          window:
+            enabled: false
+            size: 10
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: gpt-4o-mini
+          provider: langgenius/openai/openai
+        prompt_template:
+        - id: npc-system
+          role: system
+          text: "你是一位侦探 NPC，代号「档案员」。你在和一位调查者合作破案。\n\n## 关于这位调查者（来自 PowerContext 记忆库）\n{{#parse.memory_block#}}\n\n## 本局信息\n- 案件编号：{{#start.case_id#}}\n- 玩家的称呼：{{#start.player_name#}}\n\n## 你的行为准则\n1. **优先使用记忆库里的信息**。如果记忆里记录了玩家的称呼、推理风格或已排除的线索，\n   你要自然地体现出来（用他喜欢的称呼、避开他已经排除过的方向）。\n2. **步行类事实不要编造**；这里只谈推理。若记忆为空，按新客户处理，不要假装你们认识。\n3. 回复用中文，控制在 150 字以内。给出你的观察，并抛出一个能把对话推进下去的问题。\n4. 不要罗列你「记住了」什么，用对话体现记忆。\n"
+        selected: false
+        title: 侦探 NPC
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 96
+      id: npc
+      position:
+        x: 960
+        y: 280
+      positionAbsolute:
+        x: 960
+        y: 280
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        answer: '{{#npc.text#}}'
+        desc: 展示给玩家
+        selected: false
+        title: 回答
+        type: answer
+        variables: []
+      height: 104
+      id: answer
+      position:
+        x: 1260
+        y: 180
+      positionAbsolute:
+        x: 1260
+        y: 180
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        code: "import json\n\ndef main(npc_text: str, player_input: str, case_id: str) -> dict:\n    \"\"\"从 NPC 回复与玩家输入里提炼一条值得记住的记录。\"\"\"\n    player_input = (player_input or \"\").strip()\n    npc_text = (npc_text or \"\").strip()\n    if not player_input:\n        note = \"案件 %s：玩家本轮没有留下可记录的信息。\" % (case_id or \"未命名\")\n    else:\n        note = \"案件 %s：玩家提到「%s」。\" % (case_id or \"未命名\", player_input[:300])\n    if npc_text:\n        note = note + \" 侦探回应：%s\" % npc_text[:300]\n    return {\"note\": note}\n"
+        code_language: python3
+        desc: 提炼本轮记忆条目
+        outputs:
+          note:
+            type: string
+        selected: false
+        title: 提炼记忆
+        type: code
+        variables:
+        - value_selector:
+          - npc
+          - text
+          variable: npc_text
+        - value_selector:
+          - start
+          - player_input
+          variable: player_input
+        - value_selector:
+          - start
+          - case_id
+          variable: case_id
+      height: 54
+      id: extract
+      position:
+        x: 960
+        y: 460
+      positionAbsolute:
+        x: 960
+        y: 460
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - id: scope-id
+            key: scope_id
+            type: text
+            value: '{{#env.POWERCONTEXT_SCOPE_ID#}}'
+          - id: kind
+            key: kind
+            type: text
+            value: session
+          - id: text
+            key: text
+            type: text
+            value: '{{#extract.note#}}'
+          type: json
+        desc: 把本轮记忆写入 PowerContext
+        headers: ''
+        method: post
+        params: ''
+        retry_config:
+          exponential_backoff:
+            enabled: false
+            max_interval: 10000
+            multiplier: 2
+          max_retries: 2
+          retry_enabled: true
+          retry_interval: 1000
+        selected: false
+        timeout:
+          connect: 10
+          read: 30
+          write: 30
+        title: 写入记忆
+        type: http-request
+        url: '{{#env.POWERCONTEXT_URL#}}/v1/memory/remember'
+        variables: []
+      height: 96
+      id: save
+      position:
+        x: 1260
+        y: 460
+      positionAbsolute:
+        x: 1260
+        y: 460
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.8
