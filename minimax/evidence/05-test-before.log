@@ -1,0 +1,104 @@
+# 改前测试结果
+
+command: D:\coding\personalProj\OceanBaseCompetition\work\powercontext\.venv-win\Scripts\python.exe -m pytest tests -v --no-header -p no:cacheprovider
+exit_code: 1
+revision: (uncommitted working tree)
+collected: 18
+passed: 14
+failed: 4
+errors: 0
+category: missing_feature
+detail: 4 个断言失败，目标行为尚未实现
+
+--- stdout ---
+============================= test session starts =============================
+collecting ... collected 18 items
+
+tests/test_calculator.py::TestMinValueFilter::test_min_value_keeps_values_at_or_above_the_bound FAILED [  5%]
+tests/test_calculator.py::TestMinValueFilter::test_min_value_keeps_everything_when_the_bound_is_lowest PASSED [ 11%]
+tests/test_calculator.py::TestMinValueFilter::test_min_value_keeps_nothing_when_the_bound_is_highest FAILED [ 16%]
+tests/test_calculator.py::TestMinValueFilter::test_min_value_rejects_a_non_integer FAILED [ 22%]
+tests/test_calculator.py::TestMinValueFilter::test_min_value_rejects_a_negative_bound FAILED [ 27%]
+tests/test_calculator.py::TestExistingBehaviour::test_max_value_keeps_values_at_or_below_the_bound PASSED [ 33%]
+tests/test_calculator.py::TestExistingBehaviour::test_no_filter_returns_a_copy_of_the_values PASSED [ 38%]
+tests/test_calculator.py::TestExistingBehaviour::test_the_input_order_is_preserved PASSED [ 44%]
+tests/test_calculator.py::TestExistingBehaviour::test_total_sums_the_filtered_values PASSED [ 50%]
+tests/test_filters.py::TestIsNumber::test_integers_are_numbers PASSED    [ 55%]
+tests/test_filters.py::TestIsNumber::test_floats_are_numbers PASSED      [ 61%]
+tests/test_filters.py::TestIsNumber::test_booleans_are_not_numbers PASSED [ 66%]
+tests/test_filters.py::TestIsNumber::test_strings_are_not_numbers PASSED [ 72%]
+tests/test_filters.py::TestIsNumber::test_none_is_not_a_number PASSED    [ 77%]
+tests/test_filters.py::TestIsInteger::test_integers_pass PASSED          [ 83%]
+tests/test_filters.py::TestIsInteger::test_floats_do_not_pass PASSED     [ 88%]
+tests/test_filters.py::TestIsInteger::test_booleans_do_not_pass PASSED   [ 94%]
+tests/test_filters.py::TestIsInteger::test_strings_do_not_pass PASSED    [100%]
+
+================================== FAILURES ===================================
+____ TestMinValueFilter.test_min_value_keeps_values_at_or_above_the_bound _____
+
+self = <test_calculator.TestMinValueFilter object at 0x000002125ECBED50>
+
+    def test_min_value_keeps_values_at_or_above_the_bound(self):
+>       assert Calculator([1, 5, 9]).apply(min_value=5) == [5, 9]
+E       AssertionError: assert [1, 5, 9] == [5, 9]
+E         
+E         At index 0 diff: 1 != 5
+E         Left contains one more item: 9
+E         
+E         Full diff: (-: missing in left side, +: extra in left side)
+E           [
+E         +     1,...
+E         
+E         ...Full output truncated, use '-vv' to show
+
+tests\test_calculator.py:21: AssertionError
+__ TestMinValueFilter.test_min_value_keeps_nothing_when_the_bound_is_highest __
+
+self = <test_calculator.TestMinValueFilter object at 0x000002125EC9DF30>
+
+    def test_min_value_keeps_nothing_when_the_bound_is_highest(self):
+>       assert Calculator([1, 5, 9]).apply(min_value=10) == []
+E       AssertionError: assert [1, 5, 9] == []
+E         
+E         Left contains 3 more items, first extra item: 1
+E         
+E         Full diff: (-: missing in left side, +: extra in left side)
+E         - []
+E         + [
+E         +     1,...
+E         
+E         ...Full output truncated, use '-vv' to show
+
+tests\test_calculator.py:27: AssertionError
+___________ TestMinValueFilter.test_min_value_rejects_a_non_integer ___________
+
+self = <test_calculator.TestMinValueFilter object at 0x000002125EC9E190>
+
+    def test_min_value_rejects_a_non_integer(self):
+>       with pytest.raises(ValueError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests\test_calculator.py:30: Failed
+_________ TestMinValueFilter.test_min_value_rejects_a_negative_bound __________
+
+self = <test_calculator.TestMinValueFilter object at 0x000002125EC5DA30>
+
+    def test_min_value_rejects_a_negative_bound(self):
+>       with pytest.raises(ValueError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests\test_calculator.py:34: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_calculator.py::TestMinValueFilter::test_min_value_keeps_values_at_or_above_the_bound
+FAILED tests/test_calculator.py::TestMinValueFilter::test_min_value_keeps_nothing_when_the_bound_is_highest
+FAILED tests/test_calculator.py::TestMinValueFilter::test_min_value_rejects_a_non_integer
+FAILED tests/test_calculator.py::TestMinValueFilter::test_min_value_rejects_a_negative_bound
+======================== 4 failed, 14 passed in 0.41s =========================
+
+--- stderr ---
+D:\coding\personalProj\OceanBaseCompetition\work\powercontext\.venv-win\Lib\site-packages\pytest_asyncio\plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))

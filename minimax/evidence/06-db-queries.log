@@ -1,0 +1,41 @@
+# 数据库查询记录（验收第 4 项：数据库实际参与）
+
+host: 127.0.0.1:2881
+database: sdd_context
+protocol: MySQL（seekdb 与 OceanBase 均使用同一协议）
+
+工程资料保存在 seekdb/OceanBase 中，上下文里的每条来源都能在这里查到。
+
+$ SHOW TABLES
+Tables_in_sdd_context
+sdd_clause
+sdd_material
+sdd_task_state
+
+$ SELECT role, COUNT(*) AS n FROM sdd_material GROUP BY role
+role | n
+code | 3
+spec | 1
+test | 2
+
+$ SELECT material_id, role, path, content_digest FROM sdd_material ORDER BY role, path
+material_id | role | path | content_digest
+code:src/tinycalc/__init__.py:06a6053e815d | code | src/tinycalc/__init__.py | sha256:06a6053e815d8dc82812396d5a05ce13c1bb744b2913e5813d4bfbadd681b9cc
+code:src/tinycalc/calculator.py:6edc50fa80a1 | code | src/tinycalc/calculator.py | sha256:6edc50fa80a199b981c91610c0c6c6e89352e8b48cf6615600ffaa7ff4aae1c1
+code:src/tinycalc/filters.py:3bbea954c31f | code | src/tinycalc/filters.py | sha256:3bbea954c31f5ba1398a5bbde70a310b4bab26047b353299a70d5fe22a0f9fd1
+spec:spec/SPEC-001.md:de950e7eee52 | spec | spec/SPEC-001.md | sha256:de950e7eee525c0f7960d257fcbd635438f738ded1835873b8bcc6f4c293ea9e
+test:tests/test_calculator.py:2344546f69b2 | test | tests/test_calculator.py | sha256:2344546f69b22a93621b1a4514afca1969ab4b9ac383ecf82508cedb72ba30ff
+test:tests/test_filters.py:651ffd41cdc7 | test | tests/test_filters.py | sha256:651ffd41cdc7965f30a8b7b11c60c01a36619e4a43e3e86c8fde9afb2703f6c8
+
+$ SELECT clause_id, spec_id, section FROM sdd_clause ORDER BY section
+clause_id | spec_id | section
+clause:SPEC-001:bff276113fb5 | SPEC-001 | 1. 范围
+clause:SPEC-001:44fcf482b7b3 | SPEC-001 | 2.1 min_value 筛选（本任务目标）
+clause:SPEC-001:4ed981b6dfcf | SPEC-001 | 2.2 既有行为（必须保持）
+clause:SPEC-001:a4f78d4ef2c5 | SPEC-001 | 3. 验收
+clause:SPEC-001:0249800ba743 | SPEC-001 | 4. 非目标
+
+$ SELECT scope_id, task_key, updated_at FROM sdd_task_state
+scope_id | task_key | updated_at
+scp_549rm4aaqanj7gjaa3krvga8yw | task:46469c3beb700ff6 | 2026-11-12T03:42:33.585390+00:00
+

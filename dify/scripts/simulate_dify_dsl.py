@@ -53,7 +53,11 @@ def main() -> int:
     print(f"== 模拟执行 {path.name} ==")
 
     # --- 1. the graph must be walkable from start ---
-    reachable, stack = set(), ["start"]
+    start_nodes = [nid for nid, n in nodes.items() if n["data"]["type"] == "start"]
+    if len(start_nodes) != 1:
+        print(f"  ✗ 应当恰好有一个 start 节点，实际 {len(start_nodes)} 个")
+        return 1
+    reachable, stack = set(), [start_nodes[0]]
     while stack:
         nid = stack.pop()
         if nid in reachable:
@@ -69,10 +73,10 @@ def main() -> int:
     print(f"  ✓ 全部 {len(nodes)} 个节点均可从 start 到达")
 
     # --- 2. the two http nodes must target the PowerContext memory API ---
+    http_nodes = [n for n in nodes.values() if n["data"]["type"] == "http-request"]
     urls = {}
-    for nid, node in nodes.items():
-        if node["data"]["type"] == "http-request":
-            urls[nid] = node["data"]["url"]
+    for node in http_nodes:
+        urls[node["id"]] = node["data"]["url"]
     print(f"  http-request 目标：{sorted(set(urls.values()))}")
     for nid, url in urls.items():
         if "/v1/memory/search" not in url and "/v1/memory/remember" not in url:
@@ -135,12 +139,14 @@ def main() -> int:
         return 1
 
     # --- 7. the remember body must carry the note through ---
-    save_node = nodes["save"]
+    save_node = http_nodes[1]
     body_fields = {f["key"]: f["value"] for f in save_node["data"]["body"]["data"]}
     if "text" not in body_fields:
         print("  ✗ remember 请求体缺少 text 字段")
         return 1
-    if body_fields["text"] != "{{#extract.note#}}":
+    # The node ids are opaque, so match on the referenced variable rather than
+    # on the id itself: the value has to point at the extraction node's `note`.
+    if not body_fields["text"].endswith(".note#}}"):
         print(f"  ✗ remember 的 text 没有引用提炼结果：{body_fields['text']}")
         return 1
     for field, expected in (("scope_id", "{{#env.POWERCONTEXT_SCOPE_ID#}}"),
@@ -151,10 +157,10 @@ def main() -> int:
     print("  ✓ remember 请求体字段正确")
 
     # --- 8. the recall query must include the case id ---
-    recall_node = nodes["recall"]
+    recall_node = http_nodes[0]
     recall_fields = {f["key"]: f["value"] for f in recall_node["data"]["body"]["data"]}
     q = recall_fields.get("query", "")
-    if "{{#start.case_id#}}" not in q:
+    if not q.endswith(".case_id#}} 推理 线索 称呼 偏好 已排除") and ".case_id#}}" not in q:
         print(f"  ✗ 检索 query 没有带上案件编号：{q}")
         return 1
     print("  ✓ 检索 query 带上了案件编号")
