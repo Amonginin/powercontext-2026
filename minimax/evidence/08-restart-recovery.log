@@ -1,0 +1,67 @@
+# 任务状态重启复用记录
+
+时间: 2026-11-12T03:41:31Z
+PowerContext: http://127.0.0.1:8000
+scope_id: scp_549rm4aaqanj7gjaa3krvga8yw
+状态存储: PowerContext（SQLite 持久化）+ seekdb/MySQL sdd_task_state 表
+
+## 1. 从空状态保存任务记录
+$ python -m sdd state --task "..." --save --done ... --todo ... --verification ...
+{
+  "task": "为 TinyCalc 增加 min_value 筛选条件",
+  "task_key": "task:46469c3beb700ff6",
+  "done": [
+    "导入规格与代码",
+    "构建开发上下文"
+  ],
+  "todo": [
+    "生成补丁"
+  ],
+  "verification": [
+    "改前目标测试 4 项断言失败"
+  ],
+  "context_sources": [],
+  "patch": "",
+  "extra": {
+    "loaded_from": "powercontext.memory"
+  }
+}
+
+## 2. 停止 PowerContext 进程（PID 6240）
+$ taskkill /PID 6240 /F
+成功: 已终止 PID 为 6240 的进程。
+$ curl http://127.0.0.1:8000/health/ready
+upstream connect failed: 由于目标计算机积极拒绝，无法连接。 (os error 10061)
+
+## 3. 重新启动 PowerContext（新进程）
+$ powercontext server run --host 127.0.0.1 --port 8000
+INFO uvicorn Started server process [<new pid>]
+INFO powercontext.server.factory PowerContext Server is ready
+$ curl http://127.0.0.1:8000/health/ready
+{"status":"ready","checks":{"runtime":"ready","database":"ready","artifact_processing_supervisor":"disabled","access_mode":"disabled","authentication_provider":"disabled","access_provider":"disabled",
+
+## 4. 在新进程上读回状态
+$ python -m sdd state --task "..." --show
+{
+  "task": "为 TinyCalc 增加 min_value 筛选条件",
+  "task_key": "task:46469c3beb700ff6",
+  "done": [
+    "导入规格与代码",
+    "构建开发上下文"
+  ],
+  "todo": [
+    "生成补丁"
+  ],
+  "verification": [
+    "改前目标测试 4 项断言失败"
+  ],
+  "context_sources": [],
+  "patch": "",
+  "extra": {
+    "loaded_from": "powercontext.memory"
+  }
+}
+
+## 5. 结论
+重启后状态完整读回，来源标注 loaded_from=powercontext.memory，
+说明状态确实落在 PowerContext 里，而不是留在进程内存或本地文件。

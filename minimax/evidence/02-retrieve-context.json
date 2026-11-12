@@ -1,0 +1,182 @@
+{
+  "task": "为 TinyCalc 增加 min_value 筛选条件",
+  "keywords": [
+    "tinycalc",
+    "min_value",
+    "min",
+    "value",
+    "筛选条件"
+  ],
+  "specs": [
+    {
+      "kind": "spec_clause",
+      "identifier": "clause:SPEC-001:44fcf482b7b3",
+      "path": "spec/SPEC-001.md",
+      "title": "SPEC-001 · 2.1 min_value 筛选（本任务目标）",
+      "content_digest": "sha256:de950e7eee525c0f7960d257fcbd635438f738ded1835873b8bcc6f4c293ea9e",
+      "excerpt": "- `apply(min_value=N)` 必须只返回**大于等于** `N` 的元素。\n- `min_value` 必须是**非负整数**；否则必须抛出 `ValueError`。\n- `min_value` 与 `max_value` 可以同时出现，两者都必须生效。",
+      "extra": {
+        "spec_id": "SPEC-001",
+        "section": "2.1 min_value 筛选（本任务目标）",
+        "material_id": "spec:spec/SPEC-001.md:de950e7eee52"
+      }
+    },
+    {
+      "kind": "spec_clause",
+      "identifier": "clause:SPEC-001:bff276113fb5",
+      "path": "spec/SPEC-001.md",
+      "title": "SPEC-001 · 1. 范围",
+      "content_digest": "sha256:de950e7eee525c0f7960d257fcbd635438f738ded1835873b8bcc6f4c293ea9e",
+      "excerpt": "`Calculator.apply` 负责按传入的筛选条件过滤一组数值。\n本规格定义 `min_value` 筛选条件，并明确既有 `max_value` 筛选条件不得改变。",
+      "extra": {
+        "spec_id": "SPEC-001",
+        "section": "1. 范围",
+        "material_id": "spec:spec/SPEC-001.md:de950e7eee52"
+      }
+    },
+    {
+      "kind": "spec_clause",
+      "identifier": "clause:SPEC-001:a4f78d4ef2c5",
+      "path": "spec/SPEC-001.md",
+      "title": "SPEC-001 · 3. 验收",
+      "content_digest": "sha256:de950e7eee525c0f7960d257fcbd635438f738ded1835873b8bcc6f4c293ea9e",
+      "excerpt": "| 类型 | 位置 |\n|---|---|\n| 目标测试 | `tests/test_calculator.py` — `TestMinValueFilter` 类 |\n| 既有行为测试 | `tests/test_calculator.py` — `TestExistingBehaviour` 类 |\n| 回归测试 | `tests/test_filters.py` |\n\n目标测试在功能实现前必须以**断言失败**（而非环境错误）失败；\n实现后必须全部通过，回归测试必须保持通过。",
+      "extra": {
+        "spec_id": "SPEC-001",
+        "section": "3. 验收",
+        "material_id": "spec:spec/SPEC-001.md:de950e7eee52"
+      }
+    },
+    {
+      "kind": "spec_clause",
+      "identifier": "clause:SPEC-001:4ed981b6dfcf",
+      "path": "spec/SPEC-001.md",
+      "title": "SPEC-001 · 2.2 既有行为（必须保持）",
+      "content_digest": "sha256:de950e7eee525c0f7960d257fcbd635438f738ded1835873b8bcc6f4c293ea9e",
+      "excerpt": "- `apply(max_value=N)` 语义不变：只返回**小于等于** `N` 的元素。\n- `apply()` 不带任何条件时，返回原列表的**副本**（不是同一个对象）。\n- 结果保持输入顺序。\n- `total(**filters)` 等价于 `sum(apply(**filters))`。",
+      "extra": {
+        "spec_id": "SPEC-001",
+        "section": "2.2 既有行为（必须保持）",
+        "material_id": "spec:spec/SPEC-001.md:de950e7eee52"
+      }
+    },
+    {
+      "kind": "spec_clause",
+      "identifier": "clause:SPEC-001:0249800ba743",
+      "path": "spec/SPEC-001.md",
+      "title": "SPEC-001 · 4. 非目标",
+      "content_digest": "sha256:de950e7eee525c0f7960d257fcbd635438f738ded1835873b8bcc6f4c293ea9e",
+      "excerpt": "- 不引入新的依赖。\n- 不改动 `src/tinycalc/filters.py`。\n- 不改变 `Calculator` 的构造签名。",
+      "extra": {
+        "spec_id": "SPEC-001",
+        "section": "4. 非目标",
+        "material_id": "spec:spec/SPEC-001.md:de950e7eee52"
+      }
+    }
+  ],
+  "code": [
+    {
+      "kind": "code_file",
+      "identifier": "code:src/tinycalc/__init__.py:06a6053e815d",
+      "path": "src/tinycalc/__init__.py",
+      "title": "src/tinycalc/__init__.py",
+      "content_digest": "sha256:06a6053e815d8dc82812396d5a05ce13c1bb744b2913e5813d4bfbadd681b9cc",
+      "excerpt": "\"\"\"TinyCalc — the sample business project for the SDD context module.\"\"\"\n\nfrom tinycalc.calculator import Calculator\nfrom tinycalc.filters import is_integer, is_number\n\n__all__ = [\"Calculator\", \"is_integer\", \"is_number\"]\n",
+      "extra": {
+        "role": "code",
+        "digest": "sha256:06a6053e815d8dc82812396d5a05ce13c1bb744b2913e5813d4bfbadd681b9cc"
+      }
+    },
+    {
+      "kind": "code_file",
+      "identifier": "code:src/tinycalc/calculator.py:6edc50fa80a1",
+      "path": "src/tinycalc/calculator.py",
+      "title": "src/tinycalc/calculator.py",
+      "content_digest": "sha256:6edc50fa80a199b981c91610c0c6c6e89352e8b48cf6615600ffaa7ff4aae1c1",
+      "excerpt": "\"\"\"TinyCalc — a deliberately small calculator used as the SDD sample project.\n\nThe point of this package is not the arithmetic. It is that it has a stable\npublic surface, a real test suite, and one clearly specified behaviour that is\nmissing on purpose: ``apply(min_value=...)``.\n\nSPEC-001 section 2.1 asks for that filter. The implementation does not have\nit yet, so the target test fails with a plain assertion error while everything\nelse keeps working. That is the difference between a missing feature and a\nbroken environment, and it is what makes the before/after comparison in the\nMiniMax topic meaningful.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom typing import Any, Iterable, Mapping\n\n__all__ = [\"Calculator\"]\n\n\nclass Calculator:\n    \"\"\"Filters a list of numbers.\n\n    ``max_value`` has been supported since the first release and its behaviour\n    is fixed by SPEC-001 section 2.2: it keeps the elements that are less than\n    or equal to the bound.\n    \"\"\"\n\n    def __init__(self, values: Iterable[float]) -> None:\n        self.values = list(values)\n\n    def apply(self, **filters: Any) -> list[float]:\n        \"\"\"Return the values that survive the given filters.\n\n        The order of t",
+      "extra": {
+        "role": "code",
+        "digest": "sha256:6edc50fa80a199b981c91610c0c6c6e89352e8b48cf6615600ffaa7ff4aae1c1"
+      }
+    },
+    {
+      "kind": "code_file",
+      "identifier": "code:src/tinycalc/filters.py:3bbea954c31f",
+      "path": "src/tinycalc/filters.py",
+      "title": "src/tinycalc/filters.py",
+      "content_digest": "sha256:3bbea954c31f5ba1398a5bbde70a310b4bab26047b353299a70d5fe22a0f9fd1",
+      "excerpt": "ator.apply`` must not break\nthe filter semantics that are already in production.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom typing import Any\n\n__all__ = [\"is_number\", \"is_integer\"]\n\n\ndef is_number(value: Any) -> bool:\n    \"\"\"Return True when the value is a real number but not a boolean.\"\"\"\n    return isinstance(value, (int, float)) and not isinstance(value, bool)\n\n\ndef is_integer(value: Any) -> bool:\n    \"\"\"Return True when the value is an integer but not a boolean.\"\"\"\n    return isinstance(value, int) and not isinstance(value, bool)\n",
+      "extra": {
+        "role": "code",
+        "digest": "sha256:3bbea954c31f5ba1398a5bbde70a310b4bab26047b353299a70d5fe22a0f9fd1"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "kind": "test_file",
+      "identifier": "test:tests/test_calculator.py:2344546f69b2",
+      "path": "tests/test_calculator.py",
+      "title": "tests/test_calculator.py",
+      "content_digest": "sha256:2344546f69b22a93621b1a4514afca1969ab4b9ac383ecf82508cedb72ba30ff",
+      "excerpt": "ail with a plain assertion error, which is\nwhat makes them a valid \"the behaviour was missing\" baseline rather than a\nbroken environment.\n\nDo not edit this file between the before and after runs. The MiniMax topic\nchecks that the test set stays identical across the change.\n\"\"\"\n\nimport pytest\n\nfrom tinycalc import Calculator\n\n\nclass TestMinValueFilter:\n    \"\"\"The filter introduced by SPEC-001 section 2.1.\"\"\"\n\n    def test_min_value_keeps_values_at_or_above_the_bound(self):\n        assert Calculator([1, 5, 9]).apply(min_value=5) == [5, 9]\n\n    def test_min_value_keeps_everything_when_the_bound_is_lowest(self):\n        assert Calculator([1, 5, 9]).apply(min_value=1) == [1, 5, 9]\n\n    def test_min_value_keeps_nothing_when_the_bound_is_highest(self):\n        assert Calculator([1, 5, 9]).apply(min_value=10) == []\n\n    def test_min_value_rejects_a_non_integer(self):\n        with pytest.raises(ValueError):\n            Calculator([1, 2]).apply(min_value=\"x\")\n\n    def test_min_value_rejects_a_negative_bound(self):\n        with pytest.raises(ValueError):\n            Calculator([1, 2]).apply(min_value=-1)\n\n\nclass TestExistingBehaviour:\n    \"\"\"Behaviour that already shipped and must keep workin",
+      "extra": {
+        "role": "test",
+        "digest": "sha256:2344546f69b22a93621b1a4514afca1969ab4b9ac383ecf82508cedb72ba30ff",
+        "test_names": [
+          "test_max_value_keeps_values_at_or_below_the_bound",
+          "test_min_value_keeps_everything_when_the_bound_is_lowest",
+          "test_min_value_keeps_nothing_when_the_bound_is_highest",
+          "test_min_value_keeps_values_at_or_above_the_bound",
+          "test_min_value_rejects_a_negative_bound",
+          "test_min_value_rejects_a_non_integer",
+          "test_no_filter_returns_a_copy_of_the_values",
+          "test_the_input_order_is_preserved",
+          "test_total_sums_the_filtered_values"
+        ]
+      }
+    },
+    {
+      "kind": "test_file",
+      "identifier": "test:tests/test_filters.py:651ffd41cdc7",
+      "path": "tests/test_filters.py",
+      "title": "tests/test_filters.py",
+      "content_digest": "sha256:651ffd41cdc7965f30a8b7b11c60c01a36619e4a43e3e86c8fde9afb2703f6c8",
+      "excerpt": "\"\"\"Regression tests for the helpers in ``tinycalc.filters``.\n\nThese guard the behaviour that predates SPEC-001. They must pass both before\nand after the change; a failure here means the change broke something that\nwas already shipped.\n\"\"\"\n\nfrom tinycalc import filters\n\n\nclass TestIsNumber:\n    def test_integers_are_numbers(self):\n        assert filters.is_number(3) is True\n\n    def test_floats_are_numbers(self):\n        assert filters.is_number(3.5) is True\n\n    def test_booleans_are_not_numbers(self):\n        assert filters.is_number(True) is False\n\n    def test_strings_are_not_numbers(self):\n        assert filters.is_number(\"3\") is False\n\n    def test_none_is_not_a_number(self):\n        assert filters.is_number(None) is False\n\n\nclass TestIsInteger:\n    def test_integers_pass(self):\n        assert filters.is_integer(3) is True\n\n    def test_floats_do_not_pass(self):\n        assert filters.is_integer(3.5) is False\n\n    def test_booleans_do_not_pass(self):\n        assert filters.is_integer(True) is False\n\n    def test_strings_do_not_pass(self):\n        assert filters.is_integer(\"3\") is False\n",
+      "extra": {
+        "role": "test",
+        "digest": "sha256:651ffd41cdc7965f30a8b7b11c60c01a36619e4a43e3e86c8fde9afb2703f6c8",
+        "test_names": [
+          "test_booleans_are_not_numbers",
+          "test_booleans_do_not_pass",
+          "test_floats_are_numbers",
+          "test_floats_do_not_pass",
+          "test_integers_are_numbers",
+          "test_integers_pass",
+          "test_none_is_not_a_number",
+          "test_strings_are_not_numbers",
+          "test_strings_do_not_pass"
+        ]
+      }
+    }
+  ],
+  "state": {
+    "task": "为 TinyCalc 增加 min_value 筛选条件",
+    "task_key": "task:46469c3beb700ff6",
+    "done": [
+      "导入规格与代码",
+      "构建开发上下文"
+    ],
+    "todo": [
+      "生成补丁"
+    ],
+    "verification": [
+      "改前目标测试 4 项断言失败"
+    ],
+    "context_sources": [],
+    "patch": "",
+    "extra": {
+      "loaded_from": "powercontext.memory"
+    }
+  }
+}

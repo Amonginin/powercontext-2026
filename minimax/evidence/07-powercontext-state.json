@@ -1,0 +1,19 @@
+{
+  "task": "为 TinyCalc 增加 min_value 筛选条件",
+  "task_key": "task:46469c3beb700ff6",
+  "done": [
+    "导入规格、代码与测试资料",
+    "构建开发上下文"
+  ],
+  "todo": [
+    "生成补丁并应用"
+  ],
+  "verification": [
+    "改前目标测试因功能未实现而失败"
+  ],
+  "context_sources": [],
+  "patch": "",
+  "extra": {
+    "loaded_from": "powercontext.memory"
+  }
+}
