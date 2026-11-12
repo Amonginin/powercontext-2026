@@ -32,7 +32,8 @@ NPC 把你说过的话、排除过的线索、偏好的称呼存进 **PowerConte
 ## 技术分工
 
 - **Dify（必选）**：核心流程编排 —— Start 收输入 → HTTP 召回记忆 → Code 解析成提示词块 →
-  LLM 生成角色回复 → Answer 输出 → Code 提炼记忆 → HTTP 写回记忆库。
+  LLM 生成角色回复 → Code 提炼记忆 → HTTP 写回记忆库 → Answer 输出。
+  单链结构，每条分支都终结于 Answer（Chatflow 的硬性要求）。
 - **PowerContext**：`POST /v1/memory/search` 召回、`POST /v1/memory/remember` 写入。
   召回结果**直接注入 LLM 的 system prompt**，写入的是**玩家本轮真实输入**。
 
@@ -48,5 +49,6 @@ python3 dify/scripts/check_dify_dsl.py dify/apps/memory-vault.yml
 python3 dify/scripts/simulate_dify_dsl.py dify/apps/memory-vault.yml
 ```
 
-第二个脚本会真的执行 DSL 里两个 code 节点的 Python，并验证记忆读写请求体的字段，
-用来在没有 Dify 实例的情况下确认工作流逻辑正确。
+`check_dify_dsl.py` 会检查结构，包括**每条分支是否终结于 Answer** —— 首个提交版本
+就是因为「写入记忆」那条并行分支悬空被判「DSL 配置存在阻断主要流程的错误」。
+`simulate_dify_dsl.py` 会真的执行 DSL 里两个 code 节点的 Python，并验证记忆读写请求体的字段。

@@ -184,6 +184,48 @@ def check(path: Path) -> bool:
                           f"但节点 {ref} 实际是 {actual}")
                     ok = False
 
+    # --- every branch has to terminate on a terminal node ---
+    # This is the check that a rejected submission would have failed: in
+    # chatflow every path has to end at an `answer` node, and in workflow at an
+    # `end` node. A side branch that stops at an http-request looks harmless in
+    # the editor but blocks the run.
+    terminal_types = {"answer", "end"}
+    outgoing: dict[str, list[str]] = {nid: [] for nid in node_ids}
+    for edge in edges:
+        source = edge.get("source")
+        if source and str(source) in outgoing:
+            outgoing[str(source)].append(str(edge.get("target") or ""))
+
+    dangling = []
+    for nid, ntype in node_types.items():
+        if ntype in terminal_types:
+            continue
+        if not outgoing.get(nid):
+            dangling.append((nid, ntype))
+    if dangling:
+        mode = (doc.get("app") or {}).get("mode")
+        expected = "answer" if mode == "advanced-chat" else "end"
+        for nid, ntype in dangling:
+            print(f"  ✗ 节点 {nid}({ntype}) 没有后继，分支没有终结 —— "
+                  f"{mode} 模式下每条分支都必须终结于 {expected} 节点")
+        ok = False
+
+    # --- unreachable nodes are a warning, not a failure ---
+    reachable, stack = set(), []
+    for node in nodes:
+        ntype = (node.get("data") or {}).get("type")
+        if ntype == "start":
+            stack.append(str(node.get("id")))
+    while stack:
+        nid = stack.pop()
+        if nid in reachable:
+            continue
+        reachable.add(nid)
+        stack.extend(outgoing.get(nid, []))
+    orphans = set(node_ids) - reachable
+    if orphans:
+        print(f"  ⚠ 有节点无法从 start 到达：{sorted(orphans)}")
+
     # --- variable references resolve ---
     refs = set()
     collect_refs(graph, refs)
