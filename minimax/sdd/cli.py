@@ -217,6 +217,9 @@ def cmd_apply(args) -> int:
 
     project = (Path(args.project) if args.project else _project_root()).resolve()
     patch_path = Path(args.patch) if args.patch else _evidence_dir() / "04-patch.diff"
+    # git runs with the project as its working directory, so a relative patch
+    # path would be resolved against the project rather than against the caller.
+    patch_path = patch_path.resolve()
     if not patch_path.exists():
         print(f"!! 找不到补丁文件：{patch_path}", file=sys.stderr)
         return 2
